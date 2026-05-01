@@ -1,0 +1,53 @@
+services:
+  # Production-like single container: banks API + built frontend on one port.
+  app:
+    profiles: ["prod"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./data:/data
+    environment:
+      PORT: "4000"
+      DATA_FILE: "/data/cameras.json"
+      STATIC_DIR: "/app/dist"
+    restart: unless-stopped
+
+  # Dev: vite with HMR on 5173, talks to the api service via the proxy below.
+  web:
+    profiles: ["dev"]
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    command: npm run dev
+    ports:
+      - "5173:5173"
+    environment:
+      BANKS_SERVER_URL: "http://api:4000"
+    volumes:
+      - ./src:/app/src
+      - ./server:/app/server
+      - ./index.html:/app/index.html
+      - ./vite.config.ts:/app/vite.config.ts
+      - ./tsconfig.json:/app/tsconfig.json
+    depends_on:
+      - api
+
+  # Dev: banks API with tsx watch reload.
+  api:
+    profiles: ["dev"]
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    command: npm run dev:server
+    ports:
+      - "4000:4000"
+    environment:
+      PORT: "4000"
+      DATA_FILE: "/data/cameras.json"
+    volumes:
+      - ./server:/app/server
+      - ./src/banks:/app/src/banks
+      - ./data:/data

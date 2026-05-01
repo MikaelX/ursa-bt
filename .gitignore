@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Local data / runtime state
+data/
+*.log
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.cursor/
+*.swp
+
+# Project docs and task lists (kept local only)
+docs/
+tasks/
+
+# Test / coverage
+coverage/
+.vitest/

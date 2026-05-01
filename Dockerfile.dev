@@ -1,0 +1,11 @@
+# syntax=docker/dockerfile:1.7
+# Dev image: used by both the vite and api services in docker-compose.
+FROM node:22-alpine
+WORKDIR /app
+
+COPY package.json package-lock.json* ./
+RUN npm ci
+
+COPY . .
+
+EXPOSE 5173 4000
