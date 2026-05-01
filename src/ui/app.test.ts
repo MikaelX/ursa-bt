@@ -73,13 +73,13 @@ describe("createApp", () => {
     createApp(root, { client, banks });
   });
 
-  it("renders browser support and disables controls before connection", () => {
-    expect(root.querySelector("[data-support]")?.textContent).toContain("is available");
+  it("shows connect affordance and disables recording before connection", () => {
+    expect(root.querySelector<HTMLButtonElement>("[data-connect-toggle]")?.disabled).toBe(false);
     expect(root.querySelector<HTMLButtonElement>("[data-record-start]")?.disabled).toBe(true);
   });
 
   it("connects and enables controls", async () => {
-    click(root.querySelector("[data-connect]")!);
+    click(root.querySelector("[data-connect-toggle]")!);
     await flushPromises();
 
     expect(client.connect).toHaveBeenCalledOnce();
@@ -88,7 +88,7 @@ describe("createApp", () => {
   });
 
   it("toggles power on and off", async () => {
-    click(root.querySelector("[data-connect]")!);
+    click(root.querySelector("[data-connect-toggle]")!);
     await flushPromises();
 
     click(root.querySelector("[data-power]")!);
@@ -102,7 +102,7 @@ describe("createApp", () => {
   });
 
   it("sends record commands", async () => {
-    click(root.querySelector("[data-connect]")!);
+    click(root.querySelector("[data-connect-toggle]")!);
     await flushPromises();
     click(root.querySelector("[data-record-start]")!);
     await flushPromises();
@@ -111,8 +111,69 @@ describe("createApp", () => {
     expect(root.querySelector("[data-log]")?.textContent).toContain("Record start");
   });
 
+  it("second REC tap opens confirm modal without sending record start again", async () => {
+    click(root.querySelector("[data-connect-toggle]")!);
+    await flushPromises();
+    click(root.querySelector("[data-record-start]")!);
+    await flushPromises();
+    (client.writeCommand as ReturnType<typeof vi.fn>).mockClear();
+
+    click(root.querySelector("[data-record-start]")!);
+    await flushPromises();
+
+    expect(client.writeCommand).not.toHaveBeenCalled();
+    const modal = root.querySelector<HTMLElement>("[data-record-stop-confirm-modal]");
+    expect(modal?.hidden).toBe(false);
+  });
+
+  it("record stop confirm modal cancel closes without stopping", async () => {
+    click(root.querySelector("[data-connect-toggle]")!);
+    await flushPromises();
+    click(root.querySelector("[data-record-start]")!);
+    await flushPromises();
+    (client.writeCommand as ReturnType<typeof vi.fn>).mockClear();
+
+    click(root.querySelector("[data-record-start]")!);
+    await flushPromises();
+    click(root.querySelector("[data-record-stop-cancel]")!);
+    await flushPromises();
+
+    expect(client.writeCommand).not.toHaveBeenCalled();
+    expect(root.querySelector<HTMLElement>("[data-record-stop-confirm-modal]")?.hidden).toBe(true);
+  });
+
+  it("record stop confirm sends record stop", async () => {
+    click(root.querySelector("[data-connect-toggle]")!);
+    await flushPromises();
+    click(root.querySelector("[data-record-start]")!);
+    await flushPromises();
+    (client.writeCommand as ReturnType<typeof vi.fn>).mockClear();
+
+    click(root.querySelector("[data-record-start]")!);
+    await flushPromises();
+    click(root.querySelector("[data-record-stop-confirm]")!);
+    await flushPromises();
+
+    expect(client.writeCommand).toHaveBeenCalledWith(commands.recordStop());
+    expect(root.querySelector("[data-log]")?.textContent).toContain("Record stop");
+  });
+
+  it("STOP button stops without confirm modal", async () => {
+    click(root.querySelector("[data-connect-toggle]")!);
+    await flushPromises();
+    click(root.querySelector("[data-record-start]")!);
+    await flushPromises();
+    (client.writeCommand as ReturnType<typeof vi.fn>).mockClear();
+
+    click(root.querySelector("[data-record-stop]")!);
+    await flushPromises();
+
+    expect(client.writeCommand).toHaveBeenCalledWith(commands.recordStop());
+    expect(root.querySelector<HTMLElement>("[data-record-stop-confirm-modal]")?.hidden).toBe(true);
+  });
+
   it("sends focus from the horizontal fader drag", async () => {
-    click(root.querySelector("[data-connect]")!);
+    click(root.querySelector("[data-connect-toggle]")!);
     await flushPromises();
 
     const fader = root.querySelector<HTMLElement>('[data-h-fader="focus"]')!;
@@ -139,7 +200,7 @@ describe("createApp", () => {
   });
 
   it("iris joystick: vertical drag sends iris only (no master black on horizontal)", async () => {
-    click(root.querySelector("[data-connect]")!);
+    click(root.querySelector("[data-connect-toggle]")!);
     await flushPromises();
     (client.writeCommand as ReturnType<typeof vi.fn>).mockClear();
 
@@ -174,7 +235,7 @@ describe("createApp", () => {
   });
 
   it("master black knob: dragging the wheel sends a color-correction lift command, not iris/gain", async () => {
-    click(root.querySelector("[data-connect]")!);
+    click(root.querySelector("[data-connect-toggle]")!);
     await flushPromises();
     (client.writeCommand as ReturnType<typeof vi.fn>).mockClear();
 
@@ -209,7 +270,7 @@ describe("createApp", () => {
   });
 
   it("selects a camera from the LED pillar (sends Camera ID + sets destination byte)", async () => {
-    click(root.querySelector("[data-connect]")!);
+    click(root.querySelector("[data-connect-toggle]")!);
     await flushPromises();
 
     click(root.querySelector('[data-camera-led][data-camera-id="3"]')!);
@@ -240,7 +301,7 @@ describe("createApp", () => {
   it("BARS requires 1s hold to enable, tap-to-disable when active", async () => {
     vi.useFakeTimers();
     try {
-      click(root.querySelector("[data-connect]")!);
+      click(root.querySelector("[data-connect-toggle]")!);
       await vi.runOnlyPendingTimersAsync();
 
       const button = root.querySelector<HTMLButtonElement>("[data-color-bars]")!;
@@ -286,7 +347,7 @@ describe("createApp", () => {
   });
 
   it("video slideout sends dynamic range, sharpening, display LUT and auto WB", async () => {
-    click(root.querySelector("[data-connect]")!);
+    click(root.querySelector("[data-connect-toggle]")!);
     await flushPromises();
 
     click(root.querySelector("[data-video-toggle]")!);
@@ -316,7 +377,7 @@ describe("createApp", () => {
   });
 
   it("steps gain, iso, shutter and white balance via stepper buttons", async () => {
-    click(root.querySelector("[data-connect]")!);
+    click(root.querySelector("[data-connect-toggle]")!);
     await flushPromises();
 
     click(root.querySelector('[data-stepper-up="gain"]')!);
@@ -336,7 +397,7 @@ describe("createApp", () => {
   });
 
   it("audio mini-faders send L/R input level commands and ND stepper sends ND command", async () => {
-    click(root.querySelector("[data-connect]")!);
+    click(root.querySelector("[data-connect-toggle]")!);
     await flushPromises();
 
     const dragFader = (selector: string, dy: number): void => {
@@ -372,7 +433,7 @@ describe("createApp", () => {
   });
 
   it("STORE arms then saves the current snapshot to a bank slot", async () => {
-    click(root.querySelector("[data-connect]")!);
+    click(root.querySelector("[data-connect-toggle]")!);
     await flushPromises();
 
     click(root.querySelector("[data-scene-store]")!);
@@ -389,7 +450,7 @@ describe("createApp", () => {
   });
 
   it("STORE captures audio fader changes into the saved bank", async () => {
-    click(root.querySelector("[data-connect]")!);
+    click(root.querySelector("[data-connect-toggle]")!);
     await flushPromises();
 
     const fader = root.querySelector<HTMLElement>('[data-mini-fader="audio-left"]')!;
@@ -416,7 +477,7 @@ describe("createApp", () => {
   });
 
   it("loading a non-empty bank pushes its commands and lights the LED", async () => {
-    click(root.querySelector("[data-connect]")!);
+    click(root.querySelector("[data-connect-toggle]")!);
     await flushPromises();
 
     banks.state.banks[1] = {
@@ -440,7 +501,7 @@ describe("createApp", () => {
   });
 
   it("dragging a paint knob sends the corresponding color command", async () => {
-    click(root.querySelector("[data-connect]")!);
+    click(root.querySelector("[data-connect-toggle]")!);
     await flushPromises();
     (client.writeCommand as ReturnType<typeof vi.fn>).mockClear();
 
@@ -468,7 +529,7 @@ describe("createApp", () => {
   });
 
   it("clicking an empty bank logs and does not write commands", async () => {
-    click(root.querySelector("[data-connect]")!);
+    click(root.querySelector("[data-connect-toggle]")!);
     await flushPromises();
     (client.writeCommand as ReturnType<typeof vi.fn>).mockClear();
 
@@ -477,5 +538,33 @@ describe("createApp", () => {
 
     expect(client.writeCommand).not.toHaveBeenCalled();
     expect(root.querySelector("[data-log]")?.textContent).toContain("Bank 5 is empty");
+  });
+});
+
+describe("relay sessions list", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("shows hosted sessions on Connect without opening Join modal", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          sessions: [{ id: "sid-aa", name: "Wireless LAN", deviceId: "camera-a" }],
+        }),
+      }),
+    );
+    const r = document.createElement("div");
+    createApp(r, { client: createFakeClient(), banks: createFakeBanks() });
+    await flushPromises();
+    await flushPromises();
+    expect(globalThis.fetch).toHaveBeenCalled();
+    const firstReq = vi.mocked(globalThis.fetch).mock.calls[0]?.[0];
+    expect(String(firstReq)).toContain("/api/relay/sessions");
+    expect(r.querySelector("[data-relay-session-list-inline] .relay-session-row")?.textContent).toContain(
+      "Wireless LAN",
+    );
   });
 });

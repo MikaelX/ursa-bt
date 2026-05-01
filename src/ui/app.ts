@@ -1,12 +1,21 @@
-import { BlackmagicBleClient, type ConnectionState } from "../blackmagic/bleClient";
-import { CameraState, type CameraSnapshot } from "../blackmagic/cameraState";
+import { BlackmagicBleClient } from "../blackmagic/bleClient";
+import { CameraState, shouldRelayPanelSyncCommand, type CameraSnapshot } from "../blackmagic/cameraState";
 import { commands, toHex, withDestination } from "../blackmagic/protocol";
-import type { CameraStatus } from "../blackmagic/status";
+import {
+  decodeCameraStatus,
+  decodeCameraStatusFromHex,
+  formatCameraStatusLogLine,
+  type CameraStatus,
+} from "../blackmagic/status";
+import { RelayJoinedCameraClient } from "../relay/relayJoinCameraClient";
+import { RelayHostSession } from "../relay/relayHostSession";
+import { getRelaySessionsUrl, getRelaySocketUrl } from "../relay/relayUrl";
 import {
   MASTER_BLACK_RANGE,
   PAINT_CHANNELS,
   PAINT_GROUPS,
   PAINT_RANGE,
+  isViewId,
   masterBlackToNormalised,
   normalisedToMasterBlack,
   paintValueToAngle,
@@ -17,29 +26,26 @@ import {
   positionVerticalFader,
   readFaderRange,
   renderPanelTemplate,
+  setActiveView,
   initBluefyOfferModal,
+  showBluefyOfferModal,
+  showGenericWebBleHelpModal,
+  isIosLikeWebBluetoothBlocked,
+  irisTbarDragRangePx,
   updatePanel,
   updateSceneBanks,
+  writePaintSegReadout,
   valueToCenteredNorm,
   centeredNormToValue,
   type PaintChannel,
   type PaintGroup,
+  type ViewId,
 } from "./panel";
 import { applyBankToCamera, applyColorBankToCamera, BANK_COUNT, buildBankFromSnapshot, emptyBanksFile, type Bank, type BanksFile } from "../banks/bank";
 import { HttpBanksApi, NullBanksApi, type BanksApi } from "../banks/banksClient";
+import type { CameraClient } from "./cameraClientTypes";
 
-export interface CameraClient {
-  readonly isSupported: boolean;
-  readonly isConnected: boolean;
-  readonly autoReconnectEnabled: boolean;
-  connect(): Promise<ConnectionState>;
-  disconnect(): void;
-  writeCommand(packet: Uint8Array): Promise<void>;
-  triggerPairing(): Promise<void>;
-  setPower(on: boolean): Promise<void>;
-  setAutoReconnect(enabled: boolean): void;
-  tryRestoreConnection?(): Promise<ConnectionState | undefined>;
-}
+export type { CameraClient } from "./cameraClientTypes";
 
 export interface AppOptions {
   client?: CameraClient;
@@ -62,6 +68,11 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   let banks: BanksFile = emptyBanksFile();
   let storeArmed = false;
   let activeDeviceId: string | undefined;
+  let relayHostBridge: RelayHostSession | undefined;
+  /** True after Join flow established a relay session with the host proxy. */
+  let relayJoinedMode = false;
+  /** BLE GATT linked (device picked and connected locally). */
+  let bleLinked = false;
   let lastStateSaveTimer: ReturnType<typeof setTimeout> | undefined;
 
   // The live "working" scene held in memory - always reflects the current panel
@@ -89,7 +100,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     renderBanks();
   };
 
-  const loadBanksFor = async (deviceId: string): Promise<void> => {
+  const loadBanksFor = async (deviceId: string, opts?: { relayJoin?: boolean }): Promise<void> => {
     activeDeviceId = deviceId;
     try {
       banks = await banksApi.load(deviceId);
@@ -105,7 +116,8 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
         setOutgoingDestination(savedCameraNumber);
       }
 
-      if (banks.lastState) {
+      const skipHydrateFromStoredScene = opts?.relayJoin ?? false;
+      if (banks.lastState && !skipHydrateFromStoredScene) {
         const lastColor = banks.lastState.color;
         state.applyColorWrite({
           lift: { ...lastColor.lift },
@@ -141,31 +153,120 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     }, 1500);
   };
 
+  const ingestIncomingBle = (data: DataView): void => {
+    const packet = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    const hex = toHex(packet);
+    const { decoded, changedKeys } = state.ingestIncomingPacket(data);
+
+    if (!decoded) {
+      const cmdHint = packet.length >= 3 ? ` cmdId=0x${packet[2]!.toString(16)}` : "";
+      log(`Incoming (not decoded):${cmdHint} ${hex}`);
+      return;
+    }
+
+    const display = decoded.stringValue
+      ? JSON.stringify(decoded.stringValue)
+      : `[${decoded.values.join(", ")}]`;
+    const stateNote = changedKeys.length === 0 ? " [not mapped to live state]" : "";
+    log(`Incoming ${decoded.categoryName} / ${decoded.parameterName}: ${display} (${hex})${stateNote}`);
+  };
+
   const onStatus = (status: CameraStatus): void => {
     state.ingestStatus(status);
+    relayHostBridge?.pushCameraStatus(status);
     renderStatusFlags(root, status);
-    log(`Status 0x${status.raw.toString(16).padStart(2, "0")}: ${status.labels.join(", ") || "None"}`);
+    log(formatCameraStatusLogLine(status));
   };
 
   const onIncoming = (data: DataView): void => {
-    const decoded = state.ingestIncomingPacket(data);
-    const packet = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-    const hex = toHex(packet);
-
-    if (decoded) {
-      const display = decoded.stringValue
-        ? JSON.stringify(decoded.stringValue)
-        : `[${decoded.values.join(", ")}]`;
-      log(`Incoming ${decoded.categoryName} / ${decoded.parameterName}: ${display} (${hex})`);
-    } else {
-      log(`Incoming: ${hex}`);
-    }
+    relayHostBridge?.pushIncoming(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+    ingestIncomingBle(data);
   };
 
   let outgoingDestination = 255;
   const setOutgoingDestination = (dest: number): void => {
     outgoingDestination = Math.max(0, Math.min(255, Math.round(dest)));
   };
+
+  let relayJoinDelegate: RelayJoinedCameraClient | undefined;
+  let lastRelayJoinSessionId: string | undefined;
+  let relayJoinReconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  let relayJoinReconnectAttempt = 0;
+  /** Mirrors the Connect "Auto-reconnect" toggle for relay join (and BLE when not joined). */
+  let joinAutoReconnect = true;
+  const relayJoinDropChain: { handle: () => void } = { handle: () => {} };
+
+  const syncRelayHubButtons = (): void => {
+    const hosting = !!relayHostBridge?.isActive;
+    const live = bleLinked || relayJoinedMode;
+
+    const connectToggle = root.querySelector<HTMLButtonElement>("[data-connect-toggle]");
+    if (connectToggle) {
+      connectToggle.textContent = live ? "Disconnect" : "Connect";
+      connectToggle.setAttribute("aria-label", live ? "Disconnect from camera" : "Connect to camera");
+      connectToggle.classList.toggle("connect-primary", !live);
+      connectToggle.disabled = !live && !rawClient.isSupported;
+    }
+
+    const shareToggle = root.querySelector<HTMLButtonElement>("[data-relay-share-toggle]");
+    if (shareToggle) {
+      shareToggle.hidden = relayJoinedMode;
+      shareToggle.textContent = hosting ? "Stop sharing" : "Share";
+      shareToggle.setAttribute(
+        "aria-label",
+        hosting ? "Stop sharing for remote operators" : "Share this camera over the relay",
+      );
+    }
+
+    const joinToggle = root.querySelector<HTMLButtonElement>("[data-relay-join-toggle]");
+    if (joinToggle) {
+      joinToggle.hidden = bleLinked;
+      joinToggle.textContent = relayJoinedMode ? "Leave" : "Join";
+      joinToggle.setAttribute(
+        "aria-label",
+        relayJoinedMode ? "Leave remote relay session" : "Join a remote relay session",
+      );
+    }
+
+    const inlinePanel = root.querySelector<HTMLElement>("[data-relay-sessions-inline]");
+    if (inlinePanel) inlinePanel.hidden = bleLinked || relayJoinedMode;
+  };
+
+  interface RelayListedSession {
+    id: string;
+    name: string;
+    deviceId: string;
+  }
+
+  async function fetchRelaySessionsList(): Promise<RelayListedSession[]> {
+    const res = await fetch(getRelaySessionsUrl());
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = (await res.json()) as {
+      sessions?: RelayListedSession[];
+    };
+    return data.sessions ?? [];
+  }
+
+  function renderRelaySessionUl(
+    ul: HTMLUListElement | null,
+    list: RelayListedSession[],
+    onPick: (id: string) => void,
+  ): void {
+    if (!ul) return;
+    ul.innerHTML = "";
+    for (const row of list) {
+      const li = document.createElement("li");
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "relay-session-row";
+      const label = row.name ? `${row.name}` : row.id.slice(0, 8);
+      b.textContent = label;
+      b.title = row.deviceId || "Hosted session";
+      b.addEventListener("click", () => onPick(row.id));
+      li.appendChild(b);
+      ul.appendChild(li);
+    }
+  }
 
   const rawClient: CameraClient =
     options.client ??
@@ -174,9 +275,12 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       onIncomingControl: onIncoming,
       onLog: (message) => log(message),
       onDisconnect: () => {
+        relayHostBridge?.cleanup();
+        relayHostBridge = undefined;
+        bleLinked = false;
         setConnection(root, "Disconnected");
-        connected = false;
-        refreshControls();
+        queueMicrotask(() => refreshControls());
+        syncRelayHubButtons();
         log("Disconnected");
       },
       onReconnectScheduled: (delayMs, attempt) => {
@@ -188,56 +292,575 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       onReconnectSucceeded: (info) => {
         state.setDeviceName(info.deviceName);
         setConnection(root, `Connected to ${info.deviceName}`);
-        connected = true;
-        refreshControls();
+        bleLinked = true;
+        queueMicrotask(() => refreshControls());
         void loadBanksFor(info.deviceId);
+        void maybeOfferRelayHosting(info.deviceId);
+        syncRelayHubButtons();
         log(`Auto-reconnected: ${info.deviceName}`);
       },
     });
 
+  joinAutoReconnect = rawClient.autoReconnectEnabled;
+
+  const RELAY_JOIN_RESTORE_LS = "bm-relay-join-restore-v1";
+
+  interface JoinRestorePayload {
+    sessionId: string;
+    autoReconnect: boolean;
+  }
+
+  function readRelayJoinRestore(): JoinRestorePayload | undefined {
+    try {
+      const raw = localStorage.getItem(RELAY_JOIN_RESTORE_LS);
+      if (!raw) return undefined;
+      const data = JSON.parse(raw) as JoinRestorePayload;
+      if (typeof data.sessionId !== "string" || !data.sessionId) return undefined;
+      return {
+        sessionId: data.sessionId,
+        autoReconnect: Boolean(data.autoReconnect),
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  function writeRelayJoinRestore(payload: JoinRestorePayload): void {
+    try {
+      localStorage.setItem(RELAY_JOIN_RESTORE_LS, JSON.stringify(payload));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function clearRelayJoinRestore(): void {
+    try {
+      localStorage.removeItem(RELAY_JOIN_RESTORE_LS);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function touchRelayJoinRestoreAutoReconnect(enabled: boolean): void {
+    try {
+      const raw = localStorage.getItem(RELAY_JOIN_RESTORE_LS);
+      if (!raw) return;
+      const data = JSON.parse(raw) as JoinRestorePayload;
+      if (typeof data.sessionId !== "string" || !data.sessionId) return;
+      data.autoReconnect = enabled;
+      localStorage.setItem(RELAY_JOIN_RESTORE_LS, JSON.stringify(data));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function clearRelayJoinReconnectSchedule(): void {
+    if (relayJoinReconnectTimer !== undefined) {
+      clearTimeout(relayJoinReconnectTimer);
+      relayJoinReconnectTimer = undefined;
+    }
+  }
+
+  const relayJoinTransport = (): RelayJoinedCameraClient => {
+    if (relayJoinDelegate) return relayJoinDelegate;
+    relayJoinDelegate = new RelayJoinedCameraClient({
+      onRelayStatus: (msg) => {
+        const status =
+          msg.payloadHex && msg.payloadHex.length > 0
+            ? decodeCameraStatusFromHex(msg.payloadHex)
+            : decodeCameraStatus(msg.raw);
+        state.ingestStatus(status);
+        renderStatusFlags(root, status);
+        log(formatCameraStatusLogLine(status));
+      },
+      onRelayIncomingHex: (hexStr) => {
+        const hex = hexStr.trim();
+        if (hex.length < 2) return;
+        const bytes = new Uint8Array(hex.length / 2);
+        for (let i = 0; i < bytes.length; i++) {
+          bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+        }
+        ingestIncomingBle(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength));
+      },
+      onRelayBootstrapSnapshot: (snap) => {
+        state.hydrateFromRelayExport(snap);
+        const st = state.current.status;
+        if (st) renderStatusFlags(root, st);
+        log("Relay: full panel snapshot applied from host");
+      },
+      onRelayPanelSync: (snap) => {
+        state.relayPanelSyncPatch(snap);
+        log("Relay: panel sync (bars / display LUT, etc.)");
+        const banksRev = snap[RELAY_BANKS_REVISION_KEY];
+        if (typeof banksRev === "number" && activeDeviceId) {
+          void loadBanksFor(activeDeviceId, { relayJoin: true }).catch((e: unknown) => {
+            log(`Relay banks refresh failed: ${errorMessage(e)}`);
+          });
+        }
+      },
+      onJoinedInfo: (_deviceId, sessionName) => {
+        state.setDeviceName(sessionName);
+      },
+      onDropped: () => {
+        relayJoinedMode = false;
+        setConnection(root, "Disconnected");
+        queueMicrotask(() => refreshControls());
+        syncRelayHubButtons();
+        relayJoinDropChain.handle();
+      },
+      log,
+    });
+    return relayJoinDelegate;
+  };
+
+  let panelActive = true;
+
   const client: CameraClient = {
-    get isSupported() { return rawClient.isSupported; },
-    get isConnected() { return rawClient.isConnected; },
-    get autoReconnectEnabled() { return rawClient.autoReconnectEnabled; },
+    get isSupported() {
+      return rawClient.isSupported || typeof WebSocket !== "undefined";
+    },
+    get isConnected() {
+      return relayJoinedMode ? !!relayJoinTransport().isConnected : rawClient.isConnected;
+    },
+    get autoReconnectEnabled() {
+      return relayJoinedMode ? joinAutoReconnect : rawClient.autoReconnectEnabled;
+    },
     connect: () => rawClient.connect(),
-    disconnect: () => rawClient.disconnect(),
-    writeCommand: (packet: Uint8Array) => rawClient.writeCommand(withDestination(packet, outgoingDestination)),
-    triggerPairing: () => rawClient.triggerPairing(),
-    setPower: (on: boolean) => rawClient.setPower(on),
-    setAutoReconnect: (enabled: boolean) => rawClient.setAutoReconnect(enabled),
+    disconnect: () => {
+      relayHostBridge?.cleanup();
+      relayHostBridge = undefined;
+      if (relayJoinedMode) {
+        relayJoinedMode = false;
+        clearRelayJoinReconnectSchedule();
+        lastRelayJoinSessionId = undefined;
+        clearRelayJoinRestore();
+        relayJoinDelegate?.cleanup();
+        rawClient.setAutoReconnect(joinAutoReconnect);
+      }
+      rawClient.disconnect();
+      bleLinked = false;
+      setConnection(root, "Disconnected");
+      queueMicrotask(() => refreshControls());
+      syncRelayHubButtons();
+    },
+    writeCommand: (packet: Uint8Array) =>
+      relayJoinedMode
+        ? relayJoinTransport().writeCommand(packet)
+        : rawClient.writeCommand(withDestination(packet, outgoingDestination)),
+    triggerPairing: () =>
+      relayJoinedMode ? relayJoinTransport().triggerPairing() : rawClient.triggerPairing(),
+    setPower: (on: boolean) =>
+      relayJoinedMode ? relayJoinTransport().setPower(on) : rawClient.setPower(on),
+    setAutoReconnect: (enabled: boolean) => {
+      joinAutoReconnect = enabled;
+      if (!relayJoinedMode) rawClient.setAutoReconnect(enabled);
+      touchRelayJoinRestoreAutoReconnect(enabled);
+    },
     tryRestoreConnection: rawClient.tryRestoreConnection ? () => rawClient.tryRestoreConnection!() : undefined,
   };
 
-  root.innerHTML = renderPanelTemplate(client.isSupported);
+  root.innerHTML = renderPanelTemplate(rawClient.isSupported);
   attachClient(root, client);
   initBluefyOfferModal(root);
 
-  let panelActive = true;
-  let connected = false;
-  const refreshControls = (): void => {
-    setControlsEnabled(root, panelActive && connected);
+  const viewController = bindViewNav(root, {
+    onViewChange(viewId: ViewId) {
+      if (viewId === "connect") void refreshRelaySessionsDisplay({ soft: true });
+    },
+  });
+
+  async function finalizeRelayJoin(sessionId: string): Promise<void> {
+    if (bleLinked) {
+      log("Disconnect local Bluetooth session before joining remotely");
+      return;
+    }
+    if (relayHostBridge?.isActive) {
+      log("Stop sharing this camera before joining another session.");
+      return;
+    }
+
+    clearRelayJoinReconnectSchedule();
+    lastRelayJoinSessionId = sessionId;
+
+    const backdrop = root.querySelector<HTMLElement>("[data-relay-list-modal]");
+    if (backdrop) backdrop.hidden = true;
+
+    relayJoinedMode = false;
+    relayJoinTransport().cleanupQuiet();
+
+    setConnection(root, "Negotiating relay (WebSocket handshake)…");
+    try {
+      const info = await relayJoinTransport().joinSession(sessionId);
+      relayJoinedMode = true;
+      relayJoinReconnectAttempt = 0;
+      writeRelayJoinRestore({ sessionId, autoReconnect: joinAutoReconnect });
+      setConnection(root, `Joined: ${info.deviceName}`);
+      await loadBanksFor(info.deviceId, { relayJoin: true });
+      bleLinked = false;
+      refreshControls();
+      viewController.onConnected();
+      log(`Relay connected: "${info.deviceName}" via ${getRelaySocketUrl()}`);
+    } catch (e) {
+      relayJoinedMode = false;
+      relayJoinTransport().cleanup();
+      setConnection(root, "Disconnected");
+      log(`Relay join failed: ${errorMessage(e)}`);
+      refreshControls();
+      if (joinAutoReconnect && lastRelayJoinSessionId) scheduleRelayJoinReconnect();
+      else {
+        clearRelayJoinRestore();
+        lastRelayJoinSessionId = undefined;
+      }
+    }
+  }
+
+  function scheduleRelayJoinReconnect(): void {
+    if (!joinAutoReconnect || !lastRelayJoinSessionId) return;
+    if (relayJoinedMode) return;
+    if (relayJoinReconnectTimer !== undefined) return;
+    const attempt = relayJoinReconnectAttempt++;
+    const delayMs = Math.min(30_000, 800 * Math.pow(2, Math.min(attempt, 5)));
+    log(`Relay join: reconnect in ${(delayMs / 1000).toFixed(1)}s (attempt ${attempt + 1})…`);
+    relayJoinReconnectTimer = setTimeout(() => {
+      relayJoinReconnectTimer = undefined;
+      const sid = lastRelayJoinSessionId;
+      if (!sid || !joinAutoReconnect || relayJoinedMode) {
+        relayJoinReconnectAttempt = 0;
+        return;
+      }
+      void (async () => {
+        setConnection(root, "Reconnecting relay…");
+        await finalizeRelayJoin(sid);
+      })();
+    }, delayMs);
+  }
+
+  relayJoinDropChain.handle = (): void => {
+    if (joinAutoReconnect && lastRelayJoinSessionId) {
+      scheduleRelayJoinReconnect();
+    } else {
+      clearRelayJoinRestore();
+      lastRelayJoinSessionId = undefined;
+    }
+  };
+
+  async function refreshRelaySessionsDisplay(options: { soft?: boolean } = {}): Promise<void> {
+    const soft = options.soft ?? false;
+    const ulModal = root.querySelector<HTMLUListElement>("[data-relay-session-list]");
+    const ulInline = root.querySelector<HTMLUListElement>("[data-relay-session-list-inline]");
+    const emptyModal = root.querySelector<HTMLElement>("[data-relay-empty]");
+    const emptyInline = root.querySelector<HTMLElement>("[data-relay-inline-empty]");
+    const listBackdrop = root.querySelector<HTMLElement>("[data-relay-list-modal]");
+    const modalOpen = !!(listBackdrop && !listBackdrop.hidden);
+    const inlinePanel = root.querySelector<HTMLElement>("[data-relay-sessions-inline]");
+    const inlineVisible = !!(inlinePanel && !inlinePanel.hidden);
+
+    if (!modalOpen && !inlineVisible) return;
+
+    const onPick = (id: string): void => {
+      if (ulModal) ulModal.dataset.selectedSession = id;
+      void finalizeRelayJoin(id);
+    };
+
+    if (modalOpen && ulModal && emptyModal) {
+      ulModal.innerHTML = "";
+      emptyModal.hidden = false;
+      emptyModal.textContent = "Loading hosted sessions…";
+    }
+
+    if (inlineVisible && ulInline && emptyInline) {
+      const inlineHasRows = Boolean(ulInline.querySelector("li"));
+      const showSpinner = !soft || !inlineHasRows;
+      if (showSpinner) {
+        ulInline.innerHTML = "";
+        emptyInline.hidden = false;
+        emptyInline.textContent = "Loading hosted sessions…";
+      }
+    }
+
+    try {
+      const list = await fetchRelaySessionsList();
+
+      if (modalOpen) {
+        renderRelaySessionUl(ulModal, list, onPick);
+        if (emptyModal) {
+          if (list.length === 0) {
+            emptyModal.hidden = false;
+            emptyModal.textContent =
+              "No hosted sessions yet. Ask the operator to tap Share on Bluetooth, then refresh.";
+          } else emptyModal.hidden = true;
+        }
+      }
+
+      if (inlineVisible) {
+        renderRelaySessionUl(ulInline, list, onPick);
+        if (emptyInline) {
+          if (list.length === 0) {
+            emptyInline.hidden = false;
+            emptyInline.textContent =
+              "No hosted sessions. When a camera host shares over this server, it will appear here.";
+          } else emptyInline.hidden = true;
+        }
+      }
+    } catch (e) {
+      const msg = `Sessions list failed: ${errorMessage(e)}`;
+      if (modalOpen && emptyModal) {
+        emptyModal.hidden = false;
+        emptyModal.textContent = msg;
+        ulModal && (ulModal.innerHTML = "");
+      }
+      if (inlineVisible && emptyInline) {
+        emptyInline.hidden = false;
+        emptyInline.textContent = msg;
+        ulInline && (ulInline.innerHTML = "");
+      }
+      if (!soft) log(msg);
+    }
+  }
+
+  function refreshControls(): void {
+    const live = bleLinked || relayJoinedMode;
+    setControlsEnabled(root, panelActive && live);
     root.classList.toggle("panel-inactive", !panelActive);
     const connWrap = root.querySelector(".connection-controls");
     if (connWrap) {
-      connWrap.classList.toggle("is-ble-connected", client.isConnected);
+      connWrap.classList.toggle("is-ble-connected", bleLinked);
     }
-    const disconnectBtn = root.querySelector<HTMLButtonElement>("[data-disconnect]");
-    if (disconnectBtn) {
-      disconnectBtn.disabled = !client.isConnected;
+    const cameraIdCard = root.querySelector<HTMLElement>("[data-connect-camera-id-card]");
+    if (cameraIdCard) cameraIdCard.hidden = !bleLinked;
+    syncRelayHubButtons();
+    if (!bleLinked && !relayJoinedMode) {
+      void refreshRelaySessionsDisplay({ soft: true });
     }
     const btn = root.querySelector<HTMLButtonElement>("[data-panel-active]");
     if (btn) {
       btn.classList.toggle("active", panelActive);
       btn.setAttribute("aria-pressed", panelActive ? "true" : "false");
     }
-  };
+  }
+
+  relayJoinTransport(); // Instantiate once early so getters are stable during tests
+
   refreshControls();
+
   renderBanks();
+
+  const SESSION_RELAY_LS = "bm-relay-session-prefs-v1";
+
+  interface RelayStoredPrefs {
+    sessionName?: string;
+    share?: boolean;
+  }
+
+  function readRelayPrefs(deviceId: string): RelayStoredPrefs | undefined {
+    try {
+      const raw = localStorage.getItem(SESSION_RELAY_LS);
+      if (!raw) return undefined;
+      const all = JSON.parse(raw) as Record<string, RelayStoredPrefs>;
+      return all[deviceId];
+    } catch {
+      return undefined;
+    }
+  }
+
+  function writeRelayPrefs(deviceId: string, prefs: RelayStoredPrefs): void {
+    try {
+      const raw = localStorage.getItem(SESSION_RELAY_LS);
+      const all = raw ? ((JSON.parse(raw) as Record<string, RelayStoredPrefs>) ?? {}) : {};
+      all[deviceId] = prefs;
+      localStorage.setItem(SESSION_RELAY_LS, JSON.stringify(all));
+    } catch {
+      /* ignore quota / Safari private */
+    }
+  }
+
+  async function startRelayHosting(sessionName: string, deviceId: string): Promise<void> {
+    relayHostBridge?.cleanup();
+    const persistCameraId = deviceId;
+    relayHostBridge = new RelayHostSession(rawClient, {
+      log,
+      prepareBootstrapSnapshot: async () => {
+        if (!relayHostBridge?.isActive) return null;
+        try {
+          await banksApi.saveLastState(persistCameraId, currentScene);
+        } catch (e: unknown) {
+          log(`Relay bootstrap save failed: ${errorMessage(e)}`);
+        }
+        return {
+          type: "bootstrap_snapshot",
+          snapshot: JSON.parse(JSON.stringify(state.current)) as Record<string, unknown>,
+        };
+      },
+      onForwardedJoinerCommand: (bytes) => {
+        if (state.applyRelayPanelSyncFromCommandBytes(bytes)) {
+          const pl = buildPanelSyncPayload(state.current);
+          if (pl) relayHostBridge?.pushPanelSync(pl);
+        }
+      },
+    });
+    await relayHostBridge.connect(sessionName, deviceId);
+    syncRelayHubButtons();
+    void banksApi.saveLastState(deviceId, currentScene).catch((e: unknown) => {
+      log(`Relay share warm persist failed: ${errorMessage(e)}`);
+    });
+  }
+
+  let banksRevisionCounter = 0;
+  function notifyJoinersBanksChanged(): void {
+    if (!relayHostBridge?.isActive) return;
+    banksRevisionCounter += 1;
+    const pl = buildPanelSyncPayload(state.current) ?? {};
+    pl[RELAY_BANKS_REVISION_KEY] = banksRevisionCounter;
+    relayHostBridge.pushPanelSync(pl);
+  }
+
+  async function presentRelayHostShareModal(deviceId: string): Promise<void> {
+    const backdrop = root.querySelector<HTMLElement>("[data-relay-host-modal]");
+    const nameInput = root.querySelector<HTMLInputElement>("[data-relay-host-name]");
+    const shareInput = root.querySelector<HTMLInputElement>("[data-relay-host-share]");
+    if (!backdrop || !nameInput || !shareInput) return;
+
+    const existing = readRelayPrefs(deviceId);
+    nameInput.value = existing?.sessionName ?? "";
+    shareInput.checked = true;
+    backdrop.hidden = false;
+
+    await new Promise<void>((resolve) => {
+      const confirmBtn = root.querySelector<HTMLButtonElement>("[data-relay-host-confirm]");
+      const cancelBtn = root.querySelector<HTMLButtonElement>("[data-relay-host-cancel]");
+      const close = (): void => {
+        backdrop.hidden = true;
+        confirmBtn?.removeEventListener("click", onOk);
+        cancelBtn?.removeEventListener("click", onCancel);
+        resolve();
+      };
+      const onOk = (): void => {
+        const name = nameInput.value.trim().slice(0, 120);
+        const share = shareInput.checked;
+        if (name) writeRelayPrefs(deviceId, { sessionName: name, share });
+        else writeRelayPrefs(deviceId, { sessionName: "", share: false });
+        close();
+        void (async () => {
+          if (share && name) {
+            try {
+              await startRelayHosting(name, deviceId);
+            } catch (e) {
+              log(`Relay share failed: ${errorMessage(e)}`);
+            }
+          }
+        })();
+      };
+      const onCancel = (): void => {
+        const prev = readRelayPrefs(deviceId);
+        writeRelayPrefs(deviceId, {
+          sessionName: prev?.sessionName ?? "",
+          share: false,
+        });
+        close();
+      };
+      confirmBtn?.addEventListener("click", onOk, { once: true });
+      cancelBtn?.addEventListener("click", onCancel, { once: true });
+    });
+  }
+
+  async function maybeOfferRelayHosting(deviceId: string): Promise<void> {
+    const prefs = readRelayPrefs(deviceId);
+    if (prefs?.share && prefs.sessionName) {
+      try {
+        await startRelayHosting(prefs.sessionName, deviceId);
+        log(`Relay sharing on (${prefs.sessionName})`);
+      } catch (e) {
+        log(`Relay share failed: ${errorMessage(e)}`);
+      }
+      return;
+    }
+    if (prefs !== undefined) return;
+
+    await presentRelayHostShareModal(deviceId);
+  }
+
+  bind(root, "[data-relay-join-toggle]", "click", () => {
+    if (bleLinked) {
+      log("Disconnect Bluetooth before joining remotely");
+      return;
+    }
+    if (relayJoinedMode) {
+      client.disconnect();
+      log("Left remote session");
+      return;
+    }
+    if (relayHostBridge?.isActive) {
+      log("Stop BLE sharing before joining remotely");
+      return;
+    }
+    const backdrop = root.querySelector<HTMLElement>("[data-relay-list-modal]");
+    if (!backdrop) return;
+    backdrop.hidden = false;
+    void refreshRelaySessionsDisplay({ soft: false });
+  });
+
+  bind(root, "[data-relay-refresh-list]", "click", () => void refreshRelaySessionsDisplay({ soft: false }));
+  bind(root, "[data-relay-list-close]", "click", () => {
+    const backdrop = root.querySelector<HTMLElement>("[data-relay-list-modal]");
+    if (backdrop) backdrop.hidden = true;
+  });
+
+  bind(root, "[data-relay-share-toggle]", "click", () => {
+    if (relayHostBridge?.isActive) {
+      const deviceId = activeDeviceId;
+      relayHostBridge?.stopSharing();
+      relayHostBridge = undefined;
+      if (deviceId) {
+        const prefs = readRelayPrefs(deviceId);
+        if (prefs?.sessionName) {
+          writeRelayPrefs(deviceId, { sessionName: prefs.sessionName, share: false });
+        }
+      }
+      syncRelayHubButtons();
+      log("Relay sharing stopped");
+      return;
+    }
+    if (relayJoinedMode) return;
+    if (!bleLinked) {
+      const backdrop = root.querySelector<HTMLElement>("[data-relay-share-needs-connection]");
+      if (backdrop) backdrop.hidden = false;
+      return;
+    }
+    const deviceId = activeDeviceId;
+    if (!deviceId) {
+      log("Share: connect and wait for camera id before sharing");
+      return;
+    }
+    void presentRelayHostShareModal(deviceId);
+  });
+
+  bind(root, "[data-relay-share-needs-ble-ok]", "click", () => {
+    const backdrop = root.querySelector<HTMLElement>("[data-relay-share-needs-connection]");
+    if (backdrop) backdrop.hidden = true;
+  });
+
+  globalThis.setInterval(() => {
+    if (document.visibilityState !== "visible") return;
+    const main = root.querySelector<HTMLElement>(".panel-app");
+    if (main?.dataset.viewActive !== "connect") return;
+    const panel = root.querySelector<HTMLElement>("[data-relay-sessions-inline]");
+    if (!panel || panel.hidden) return;
+    void refreshRelaySessionsDisplay({ soft: true });
+  }, 14000);
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    const main = root.querySelector<HTMLElement>(".panel-app");
+    if (main?.dataset.viewActive !== "connect") return;
+    const panel = root.querySelector<HTMLElement>("[data-relay-sessions-inline]");
+    if (!panel || panel.hidden) return;
+    void refreshRelaySessionsDisplay({ soft: true });
+  });
 
   let prevSnapshot: CameraSnapshot | null = null;
   let prevDirty = false;
   state.subscribe((snapshot) => {
-    updatePanel(root, snapshot);
+    updatePanel(root, snapshot, { localBleGattConnected: bleLinked && !relayJoinedMode });
     pulseChangedControls(root, prevSnapshot, snapshot);
     prevSnapshot = snapshot;
     currentScene = buildBankFromSnapshot(snapshot);
@@ -249,28 +872,36 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     scheduleLastStateSave();
   });
 
-  bind(root, "[data-connect]", "click", async () => {
+  bind(root, "[data-connect-toggle]", "click", async () => {
+    const live = bleLinked || relayJoinedMode;
+    if (live) {
+      client.disconnect();
+      log("Disconnect requested");
+      return;
+    }
+    if (!rawClient.isSupported) {
+      if (isIosLikeWebBluetoothBlocked()) showBluefyOfferModal(root);
+      else showGenericWebBleHelpModal(root);
+      return;
+    }
     try {
+      clearRelayJoinReconnectSchedule();
+      lastRelayJoinSessionId = undefined;
+      clearRelayJoinRestore();
       setConnection(root, "Connecting...");
       const info = await client.connect();
       state.setDeviceName(info.deviceName);
       setConnection(root, `Connected to ${info.deviceName}`);
-      connected = true;
+      bleLinked = true;
       refreshControls();
       void loadBanksFor(info.deviceId);
       log(`Connected: ${info.deviceName}`);
+      void maybeOfferRelayHosting(info.deviceId);
+      viewController.onConnected();
     } catch (error) {
       setConnection(root, "Connection failed");
       log(errorMessage(error));
     }
-  });
-
-  bind(root, "[data-disconnect]", "click", () => {
-    client.disconnect();
-    setConnection(root, "Disconnected");
-    connected = false;
-    refreshControls();
-    log("Disconnect requested");
   });
 
   const autoReconnectInput = root.querySelector<HTMLInputElement>("[data-auto-reconnect]");
@@ -282,20 +913,29 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     });
   }
 
+  void (async () => {
+    const data = readRelayJoinRestore();
+    if (!data?.autoReconnect || !data.sessionId) return;
+    if (typeof WebSocket === "undefined") return;
+    if (bleLinked || relayHostBridge?.isActive || relayJoinedMode) return;
+    joinAutoReconnect = true;
+    lastRelayJoinSessionId = data.sessionId;
+    if (autoReconnectInput) autoReconnectInput.checked = true;
+    rawClient.setAutoReconnect(true);
+    log(`Relay join: restoring session ${data.sessionId.slice(0, 8)}…`);
+    try {
+      await finalizeRelayJoin(data.sessionId);
+    } catch {
+      /* finalizeRelayJoin catches internally */
+    }
+  })();
+
   bind(root, "[data-power]", "click", async () => {
     const isOn = state.current.status?.powerOn ?? false;
     const next = !isOn;
     await runAction(log, next ? "Power on" : "Power off", () => client.setPower(next));
   });
 
-  bindCommand(root, log, "[data-record-start]", "Record start", () => {
-    state.setRecording(true);
-    return commands.recordStart();
-  });
-  bindCommand(root, log, "[data-record-stop]", "Record stop", () => {
-    state.setRecording(false);
-    return commands.recordStop();
-  });
   bindCommand(root, log, "[data-autofocus]", "Autofocus", () => commands.autoFocus());
   bindCommand(root, log, "[data-auto-aperture]", "Auto iris", () => commands.autoAperture());
   bindCommand(root, log, "[data-still-capture]", "Still capture", () => commands.stillCapture());
@@ -303,8 +943,8 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     state.resetColor();
     await sendCommand(log, "Color reset", commands.colorReset());
   });
-  bindColorBars(root, (packet, label) => sendCommand(log, label, packet));
-  bindProgramReturnFeed(root, (packet, label) => sendCommand(log, label, packet));
+  bindColorBars(root, state, (packet, label) => sendCommand(log, label, packet));
+  bindProgramReturnFeed(root, state, (packet, label) => sendCommand(log, label, packet));
   bindCall(root, state, (packet, label) => sendCommand(log, label, packet));
 
   const advBtn = root.querySelector<HTMLButtonElement>("[data-color-adv]");
@@ -317,7 +957,9 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
         advBtn.classList.add("active");
         advBtn.setAttribute("aria-pressed", "true");
         colorCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
-        requestAnimationFrame(() => updatePanel(root, state.current));
+        requestAnimationFrame(() =>
+          updatePanel(root, state.current, { localBleGattConnected: bleLinked && !relayJoinedMode }),
+        );
       } else {
         colorCard.setAttribute("hidden", "");
         advBtn.classList.remove("active");
@@ -327,6 +969,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   }
 
   bindHFader(root, "focus", "Focus", (packet, label) => sendCommand(log, label, packet), (value) => commands.focus(value), () => state.current.lens.focus ?? 0.5);
+  bindFocusActiveToggle(root, log);
   bindMasterBlackKnob(root, state, log, (packet, label) => sendCommand(log, label, packet));
   bindIrisJoystick(root, state, log, (packet, label) => sendCommand(log, label, packet));
 
@@ -366,8 +1009,11 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
 
   bind(root, "[data-auto-exp]", "click", async () => {
     const current = state.current.autoExposureMode ?? 0;
-    const nextMode = current === 0 ? 1 : 0;
-    const label = nextMode === 0 ? "Auto Exp off (Manual)" : "Auto Exp on (Iris)";
+    const nextMode = (current + 1) % 5;
+    const modeNames = ["Manual", "Iris", "Shutter", "Iris+Shutter", "Shutter+Iris"];
+    const label = nextMode === 0
+      ? "Auto Exp off (Manual)"
+      : `Auto Exp ${modeNames[nextMode]}`;
     await sendCommand(log, label, commands.autoExposureMode(nextMode));
   });
 
@@ -413,8 +1059,6 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     log(`Panel ${panelActive ? "active" : "inactive"} (readouts still live)`);
   });
 
-  bindCardToggle(root, "[data-audio-toggle]", "[data-audio-card]");
-  bindCardToggle(root, "[data-video-toggle]", "[data-video-card]");
   bindVideoCard(root, state, log, (packet, label) => sendCommand(log, label, packet));
 
   const sendPotPacket = (packet: Uint8Array, label: string): Promise<void> => sendCommand(log, label, packet);
@@ -483,6 +1127,10 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       setOutgoingDestination(id);
       state.applyMetadataWrite({ cameraId: String(id) });
       await sendCommand(log, `Camera ${id} (dest + slate ID)`, commands.metadataCameraId(String(id)));
+      if (relayHostBridge?.isActive) {
+        const pl = buildPanelSyncPayload(state.current);
+        if (pl) relayHostBridge.pushPanelSync(pl);
+      }
     });
   });
 
@@ -514,6 +1162,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
           prevDirty = false;
           renderBanks();
           log(`Stored current settings to bank ${slot + 1}`);
+          notifyJoinersBanksChanged();
         } catch (error) {
           log(`Bank store failed: ${errorMessage(error)}`);
         }
@@ -537,6 +1186,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
         prevDirty = false;
         renderBanks();
         log(`Loaded bank ${slot + 1}`);
+        notifyJoinersBanksChanged();
       } catch (error) {
         log(`Bank load failed: ${errorMessage(error)}`);
       }
@@ -551,9 +1201,10 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
         if (info) {
           state.setDeviceName(info.deviceName);
           setConnection(root, `Connected to ${info.deviceName}`);
-          connected = true;
+          bleLinked = true;
           refreshControls();
           void loadBanksFor(info.deviceId);
+          void maybeOfferRelayHosting(info.deviceId);
           log(`Restored connection: ${info.deviceName}`);
         } else {
           setConnection(root, "Disconnected");
@@ -570,8 +1221,43 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     label: string,
     packet: Uint8Array,
   ): Promise<void> {
-    await runAction(logger, label, () => client.writeCommand(packet), packet);
+    const ok = await runAction(logger, label, () => client.writeCommand(packet), packet);
+    if (ok && relayHostBridge?.isActive && shouldRelayPanelSyncCommand(packet)) {
+      const pl = buildPanelSyncPayload(state.current);
+      if (pl) relayHostBridge.pushPanelSync(pl);
+    }
   }
+
+  bind(root, "[data-record-start]", "click", async () => {
+    if (!state.current.recording) {
+      state.setRecording(true);
+      await sendCommand(log, "Record start", commands.recordStart());
+      return;
+    }
+    const backdrop = root.querySelector<HTMLElement>("[data-record-stop-confirm-modal]");
+    if (backdrop) backdrop.hidden = false;
+  });
+
+  bind(root, "[data-record-stop]", "click", async () => {
+    state.setRecording(false);
+    await sendCommand(log, "Record stop", commands.recordStop());
+  });
+
+  const closeRecordStopConfirmModal = (): void => {
+    const backdrop = root.querySelector<HTMLElement>("[data-record-stop-confirm-modal]");
+    if (backdrop) backdrop.hidden = true;
+  };
+
+  bind(root, "[data-record-stop-cancel]", "click", closeRecordStopConfirmModal);
+  bind(root, "[data-record-stop-confirm]", "click", async () => {
+    closeRecordStopConfirmModal();
+    state.setRecording(false);
+    await sendCommand(log, "Record stop", commands.recordStop());
+  });
+
+  bind(root, "[data-record-stop-confirm-modal]", "click", (ev) => {
+    if (ev.target === ev.currentTarget) closeRecordStopConfirmModal();
+  });
 
   function bindCommand(
     scope: HTMLElement,
@@ -643,11 +1329,8 @@ function bindMasterBlackKnob(
     const nextValue = normalisedToMasterBlack(nextNorm);
     pendingValue = Math.max(MASTER_BLACK_RANGE.min, Math.min(MASTER_BLACK_RANGE.max, Number(nextValue.toFixed(2))));
 
-    const marker = root.querySelector<HTMLElement>("[data-iris-wheel-marker]");
-    if (marker) {
-      const angleDeg = masterBlackToNormalised(pendingValue) * 270 - 135;
-      marker.style.transform = `rotate(${angleDeg}deg)`;
-    }
+    const angleDeg = masterBlackToNormalised(pendingValue) * 270 - 135;
+    knob.style.setProperty("--angle", `${angleDeg}deg`);
 
     flush(false);
   };
@@ -681,6 +1364,44 @@ function bindMasterBlackKnob(
   knob.style.cursor = "grab";
 }
 
+const FOCUS_ACTIVE_STORAGE_KEY = "bm-iris-focus-active";
+
+function bindFocusActiveToggle(root: HTMLElement, log: (message: string) => void): void {
+  const cell = root.querySelector<HTMLElement>("[data-iris-focus-cell]");
+  const toggle = root.querySelector<HTMLButtonElement>("[data-iris-focus-toggle]");
+  if (!cell || !toggle) return;
+
+  let active = false;
+  try {
+    if (typeof localStorage !== "undefined") {
+      active = localStorage.getItem(FOCUS_ACTIVE_STORAGE_KEY) === "1";
+    }
+  } catch {
+    /* ignore storage errors */
+  }
+
+  const apply = (next: boolean, fromUser: boolean): void => {
+    active = next;
+    cell.dataset.active = active ? "true" : "false";
+    toggle.setAttribute("aria-pressed", active ? "true" : "false");
+    toggle.classList.toggle("is-active", active);
+    try {
+      if (typeof localStorage !== "undefined") {
+        localStorage.setItem(FOCUS_ACTIVE_STORAGE_KEY, active ? "1" : "0");
+      }
+    } catch {
+      /* ignore storage errors */
+    }
+    if (fromUser) {
+      log(`Focus control ${active ? "activated" : "deactivated"}`);
+    }
+  };
+
+  apply(active, false);
+
+  toggle.addEventListener("click", () => apply(!active, true));
+}
+
 function bindIrisJoystick(
   root: HTMLElement,
   state: CameraState,
@@ -692,7 +1413,7 @@ function bindIrisJoystick(
   if (!joystick || !handle) return;
 
   const minSendIntervalMs = 60;
-  const verticalRangePx = (): number => joystick.clientHeight - 1.2 * 16 - handle.offsetHeight;
+  const verticalRangePx = (): number => irisTbarDragRangePx(joystick, handle);
 
   let dragging = false;
   let pointerId: number | null = null;
@@ -765,6 +1486,7 @@ function bindIrisJoystick(
 
 function bindColorBars(
   root: HTMLElement,
+  state: CameraState,
   send: (packet: Uint8Array, label: string) => Promise<void> | void,
 ): void {
   const button = root.querySelector<HTMLButtonElement>("[data-color-bars]");
@@ -772,16 +1494,10 @@ function bindColorBars(
 
   const HOLD_MS = 1000;
 
-  let active = false;
   let holdTimer: ReturnType<typeof setTimeout> | null = null;
   let holdPointerId: number | null = null;
 
-  const setActive = (on: boolean): void => {
-    if (active === on) return;
-    active = on;
-    button.classList.toggle("active", on);
-    button.setAttribute("aria-pressed", on ? "true" : "false");
-  };
+  const isBarsOn = (): boolean => state.current.unitOutputs?.colorBars === true;
 
   const setArming = (on: boolean): void => {
     button.classList.toggle("arming", on);
@@ -800,9 +1516,9 @@ function bindColorBars(
     event.preventDefault();
     if (button.disabled) return;
 
-    if (active) {
+    if (isBarsOn()) {
       try { button.setPointerCapture(event.pointerId); } catch { /* ignore */ }
-      setActive(false);
+      state.applyUnitOutputsWrite({ colorBars: false });
       void send(commands.colorBars(0), "Color bars off");
       return;
     }
@@ -814,7 +1530,7 @@ function bindColorBars(
       holdTimer = null;
       setArming(false);
       holdPointerId = null;
-      setActive(true);
+      state.applyUnitOutputsWrite({ colorBars: true });
       void send(commands.colorBars(30), "Color bars on (held 1s)");
     }, HOLD_MS);
   };
@@ -839,6 +1555,7 @@ function bindColorBars(
 
 function bindProgramReturnFeed(
   root: HTMLElement,
+  state: CameraState,
   send: (packet: Uint8Array, label: string) => Promise<void> | void,
 ): void {
   const button = root.querySelector<HTMLButtonElement>("[data-program-return-feed]");
@@ -846,16 +1563,10 @@ function bindProgramReturnFeed(
 
   const HOLD_MS = 3000;
 
-  let active = false;
   let holdTimer: ReturnType<typeof setTimeout> | null = null;
   let holdPointerId: number | null = null;
 
-  const setActive = (on: boolean): void => {
-    if (active === on) return;
-    active = on;
-    button.classList.toggle("active", on);
-    button.setAttribute("aria-pressed", on ? "true" : "false");
-  };
+  const isReturnOn = (): boolean => state.current.unitOutputs?.programReturnFeed === true;
 
   const setArming = (on: boolean): void => {
     button.classList.toggle("arming", on);
@@ -874,9 +1585,9 @@ function bindProgramReturnFeed(
     event.preventDefault();
     if (button.disabled) return;
 
-    if (active) {
+    if (isReturnOn()) {
       try { button.setPointerCapture(event.pointerId); } catch { /* ignore */ }
-      setActive(false);
+      state.applyUnitOutputsWrite({ programReturnFeed: false });
       void send(commands.programReturnFeed(0), "Program return feed off");
       return;
     }
@@ -888,7 +1599,7 @@ function bindProgramReturnFeed(
       holdTimer = null;
       setArming(false);
       holdPointerId = null;
-      setActive(true);
+      state.applyUnitOutputsWrite({ programReturnFeed: true });
       void send(commands.programReturnFeed(30), "Program return feed on (held 3s)");
     }, HOLD_MS);
   };
@@ -1032,36 +1743,92 @@ function setAutoWbActive(root: HTMLElement, active: boolean): void {
   });
 }
 
-function bindCardToggle(root: HTMLElement, buttonSelector: string, cardSelector: string): void {
-  const button = root.querySelector<HTMLButtonElement>(buttonSelector);
-  const card = root.querySelector<HTMLElement>(cardSelector);
-  if (!button || !card) return;
-  button.addEventListener("click", () => {
-    const opening = card.hasAttribute("hidden");
-    if (opening) {
-      card.removeAttribute("hidden");
-      button.classList.add("active");
-      button.setAttribute("aria-pressed", "true");
-      if (typeof card.scrollIntoView === "function") {
-        card.scrollIntoView({ behavior: "smooth", block: "nearest" });
-      }
-    } else {
-      card.setAttribute("hidden", "");
-      button.classList.remove("active");
-      button.setAttribute("aria-pressed", "false");
-    }
-  });
+interface ViewController {
+  /** Switch to the named view. Persists to localStorage. */
+  setView(viewId: ViewId): void;
+  /** Currently visible view. */
+  getActiveView(): ViewId;
+  /** Called when the camera connection succeeds. Auto-advances away from Connect. */
+  onConnected(): void;
 }
 
-const EXPOSURE_LADDER_US = [
-  500, 1000, 2000, 4000, 8000, 16667, 20000, 25000, 33333, 40000, 41667, 50000, 60000, 80000, 100000,
-];
+const VIEW_STORAGE_KEY = "bm-active-view";
 
-function stepExposureUs(current: number, direction: 1 | -1): number {
-  const idx = EXPOSURE_LADDER_US.findIndex((v) => v >= current);
-  const baseIndex = idx === -1 ? EXPOSURE_LADDER_US.length - 1 : idx;
-  const nextIndex = Math.max(0, Math.min(EXPOSURE_LADDER_US.length - 1, baseIndex + direction));
-  return EXPOSURE_LADDER_US[nextIndex] ?? current;
+/**
+ * Read the persisted active view, or null if absent/unknown. Some browsers
+ * (e.g. private mode) throw on `localStorage` access, so guard everything.
+ */
+function readPersistedView(): ViewId | null {
+  if (typeof localStorage === "undefined") return null;
+  try {
+    const value = localStorage.getItem(VIEW_STORAGE_KEY);
+    return isViewId(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistView(viewId: ViewId): void {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(VIEW_STORAGE_KEY, viewId);
+  } catch {
+    /* ignore */
+  }
+}
+
+interface ViewNavOptions {
+  onViewChange?: (viewId: ViewId) => void;
+}
+
+/**
+ * Wire up the bottom-nav tabs and any "shortcut" buttons (e.g. the legacy
+ * `[data-video-toggle]` / `[data-audio-toggle]`) to switch views. Returns a
+ * controller for use by the rest of the app (e.g. auto-switch on connect).
+ */
+function bindViewNav(root: HTMLElement, options?: ViewNavOptions): ViewController {
+  const initial = readPersistedView() ?? "connect";
+  setActiveView(root, initial);
+
+  const switchTo = (viewId: ViewId): void => {
+    setActiveView(root, viewId);
+    persistView(viewId);
+    options?.onViewChange?.(viewId);
+  };
+
+  root.querySelectorAll<HTMLButtonElement>("[data-view-switch]").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      const target = tab.dataset.viewSwitch;
+      if (isViewId(target)) switchTo(target);
+    });
+  });
+
+  // Legacy aliases — map old chassis-footer buttons to view switches so any
+  // existing wiring (including tests) continues to work.
+  const aliases: Record<string, ViewId> = {
+    "[data-video-toggle]": "video",
+    "[data-audio-toggle]": "audio",
+  };
+  for (const [selector, viewId] of Object.entries(aliases)) {
+    root.querySelectorAll<HTMLButtonElement>(selector).forEach((button) => {
+      button.addEventListener("click", () => switchTo(viewId));
+    });
+  }
+
+  return {
+    setView: switchTo,
+    getActiveView: () => {
+      const main = root.querySelector<HTMLElement>(".panel-app");
+      const value = main?.dataset.viewActive;
+      return isViewId(value) ? value : "connect";
+    },
+    onConnected: () => {
+      // If the user is staring at the Connect screen, jump to the most useful
+      // operating view. Respect any other view they may have already navigated to.
+      const main = root.querySelector<HTMLElement>(".panel-app");
+      if (main?.dataset.viewActive === "connect") switchTo("iris");
+    },
+  };
 }
 
 function bindVideoCard(
@@ -1092,15 +1859,11 @@ function bindVideoCard(
     if (!lutSelect || !lutEnabled) return;
     const sel = Number(lutSelect.value);
     const en = lutEnabled.checked;
+    state.applyDisplayLutWrite({ selected: sel, enabled: en });
     void send(commands.displayLut(sel, en), `Display LUT ${["None","Custom","Film→Video","Film→ExtVideo"][sel] ?? sel}${en ? " on" : " off"}`);
   };
   lutSelect?.addEventListener("change", sendLut);
   lutEnabled?.addEventListener("change", sendLut);
-
-  bindStepper(root, "exposure", async (direction) => {
-    const next = stepExposureUs(state.current.exposureUs ?? 16667, direction);
-    await send(commands.exposureUs(next), `Exposure ${next}µs`);
-  });
 
   const sendTally = (packet: Uint8Array, label: string): Promise<void> => Promise.resolve(send(packet, label) as void);
 
@@ -1163,7 +1926,6 @@ function bindPaintKnobs(
     if (!group || !channel) return;
 
     const knob = cell.querySelector<HTMLElement>("[data-knob]");
-    const indicator = cell.querySelector<HTMLElement>("[data-knob-indicator]");
     const readout = cell.querySelector<HTMLElement>("[data-paint-value]");
     if (!knob) return;
 
@@ -1205,11 +1967,10 @@ function bindPaintKnobs(
     };
 
     const updateVisuals = (value: number): void => {
-      if (indicator) {
-        indicator.style.transform = `rotate(${paintValueToAngle(group, value)}deg)`;
-      }
+      knob.style.setProperty("--angle", `${paintValueToAngle(group, value)}deg`);
+      knob.setAttribute("aria-valuenow", value.toFixed(2));
       if (readout) {
-        readout.textContent = value.toFixed(2);
+        writePaintSegReadout(readout, value);
       }
     };
 
@@ -1388,7 +2149,9 @@ function bindMiniFader(
     if (!dragging || pointerId !== event.pointerId) return;
     event.preventDefault();
     const dy = event.clientY - startClientY;
-    const verticalRange = fader.clientHeight - handle.offsetHeight || 1;
+    const track = fader.querySelector<HTMLElement>(".bm-mfader__track");
+    const basis = track && track.clientHeight > 0 ? track : fader;
+    const verticalRange = basis.clientHeight - handle.offsetHeight || 1;
     const next = Math.max(0, Math.min(1, startValue - dy / verticalRange));
     pendingValue = Number(next.toFixed(3));
 
@@ -1422,6 +2185,13 @@ function bindMiniFader(
   fader.addEventListener("pointercancel", stopDrag);
   fader.style.touchAction = "none";
   fader.style.cursor = "grab";
+
+  // Seed the visual position before any snapshot arrives so the thumb sits at
+  // its natural rest (0.5 for audio levels, 1.0 for tally brightness) instead
+  // of the CSS fallback of 0 which puts every thumb at the very bottom.
+  const initial = readCurrent();
+  positionMiniFaderHandle(fader, handle, initial);
+  if (readout) readout.textContent = initial.toFixed(2);
 }
 
 
@@ -1554,7 +2324,7 @@ function bindColorVerticalFaders(
       bindVerticalFader(fader, handle, {
         readCurrent: () => state.current.color[group][channel],
         onChange: (value) => {
-          readout.textContent = value.toFixed(2);
+          writePaintSegReadout(readout, value);
           fader.setAttribute("aria-valuenow", value.toFixed(2));
         },
         send: (value) => {
@@ -1626,7 +2396,9 @@ function bindVerticalFader(
     if (!dragging || pointerId !== event.pointerId) return;
     event.preventDefault();
     const dy = event.clientY - startClientY;
-    const verticalRange = (fader.clientHeight - handle.offsetHeight - 16) || 1;
+    const track = fader.querySelector<HTMLElement>(".bm-mfader__track");
+    const basis = track && track.clientHeight > 0 ? track : fader;
+    const verticalRange = (basis.clientHeight - handle.offsetHeight) || 1;
     const startNorm = valueToCenteredNorm(startValue, range);
     const nextNorm = Math.max(0, Math.min(1, startNorm - dy / verticalRange));
     const next = centeredNormToValue(nextNorm, range);
@@ -1751,19 +2523,36 @@ function bind(root: HTMLElement, selector: string, eventName: string, handler: (
   elements.forEach((element) => element.addEventListener(eventName, handler));
 }
 
+function buildPanelSyncPayload(snapshot: CameraSnapshot): Record<string, unknown> | null {
+  const out: Record<string, unknown> = {};
+  if (snapshot.unitOutputs) out.unitOutputs = snapshot.unitOutputs;
+  if (snapshot.displayLut) out.displayLut = snapshot.displayLut;
+  if (snapshot.cameraNumber !== undefined) out.cameraNumber = snapshot.cameraNumber;
+  if (snapshot.metadata && Object.keys(snapshot.metadata).length > 0) {
+    out.metadata = { ...snapshot.metadata };
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/** Side-channel marker tucked into a `panel_sync` snapshot to nudge joiners
+ *  to refetch their per-device bank list / loaded slot from the server. */
+const RELAY_BANKS_REVISION_KEY = "__relayBanksRevision";
+
 async function runAction(
   log: (message: string) => void,
   label: string,
   action: () => Promise<void>,
   packet?: Uint8Array,
-): Promise<void> {
+): Promise<boolean> {
   const commandLog = packet ? ` (${toHex(packet)})` : "";
 
   try {
     await action();
     log(`${label}${commandLog}`);
+    return true;
   } catch (error) {
     log(`${label} failed: ${errorMessage(error)}`);
+    return false;
   }
 }
 
@@ -1774,7 +2563,20 @@ function setConnection(root: HTMLElement, message: string): void {
   }
 }
 
-const ALWAYS_ENABLED_SELECTORS = ["[data-panel-active]", "[data-connect]", "[data-disconnect]", "[data-clear-log]"];
+const ALWAYS_ENABLED_SELECTORS = [
+  "[data-panel-active]",
+  "[data-connect-toggle]",
+  "[data-clear-log]",
+  "[data-relay-join-toggle]",
+  "[data-relay-share-toggle]",
+  "[data-relay-share-needs-ble-ok]",
+  "[data-relay-refresh-list]",
+  "[data-relay-list-close]",
+  "[data-relay-host-confirm]",
+  "[data-relay-host-cancel]",
+  "[data-record-stop-cancel]",
+  "[data-record-stop-confirm]",
+];
 
 function setControlsEnabled(root: HTMLElement, enabled: boolean): void {
   root.querySelectorAll<HTMLElement>("[data-control]").forEach((element) => {
@@ -1783,6 +2585,12 @@ function setControlsEnabled(root: HTMLElement, enabled: boolean): void {
       element.disabled = !enabled;
     }
   });
+  if (!enabled) {
+    root.querySelectorAll<HTMLElement>("[data-dragging], .dragging").forEach((element) => {
+      element.classList.remove("dragging");
+      delete element.dataset.dragging;
+    });
+  }
 }
 
 function renderStatusFlags(root: HTMLElement, status: CameraStatus): void {

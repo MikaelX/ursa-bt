@@ -1,5 +1,6 @@
 import "../styles.css";
 import "./patterns.css";
+import "./page.css";
 import { renderPatternLibrary } from "./page";
 
 const root = document.querySelector<HTMLDivElement>("#patterns");

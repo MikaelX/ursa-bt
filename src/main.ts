@@ -1,3 +1,4 @@
+import "./patterns/patterns.css";
 import "./styles.css";
 import { createApp } from "./ui/app";
 

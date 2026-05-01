@@ -1,4 +1,5 @@
 import type { CameraSnapshot } from "../blackmagic/cameraState";
+import { populateSegSlots } from "./segmentDisplay";
 
 export const CAMERA_COUNT = 8;
 export const PAINT_CHANNELS = ["red", "green", "blue", "luma"] as const;
@@ -12,6 +13,19 @@ export const COLOR_GROUP_RANGES: Record<PaintGroup, { min: number; max: number; 
   gain: { min: 0, max: 16, default: 1 },
 };
 
+function renderSegReadout(
+  readoutKey: string,
+  classes: string,
+  attrs = "",
+  outer: "div" | "span" = "div",
+): string {
+  return `
+    <${outer} class="bm-seg2 app-bm-seg-readout ${classes}" data-readout="${readoutKey}" data-seg-display ${attrs}>
+      <${outer} class="bm-seg2__display" data-seg-slots></${outer}>
+    </${outer}>
+  `.replace(/\s*\n\s*/g, "\n").trim();
+}
+
 function formatScale(value: number): string {
   if (Number.isInteger(value)) return value > 0 ? `+${value}` : `${value}`;
   const fixed = value.toFixed(1);
@@ -22,18 +36,17 @@ function renderAudioFader(dataAttr: string, readoutKey: string, label: string): 
   return `
     <div class="audio-fader-cell">
       <span class="audio-fader-readout" data-readout="${readoutKey}">0.50</span>
-      <div class="mini-fader" data-mini-fader="${dataAttr}" data-control aria-label="${label}">
-        <div class="mini-fader-scale">
-          <span>+</span>
-          <span></span>
-          <span></span>
-          <span></span>
-          <span></span>
-          <span>-</span>
-        </div>
-        <div class="mini-fader-track"></div>
-        <div class="mini-fader-handle" data-mini-fader-handle>
-          <div class="mini-fader-cap"></div>
+      <div
+        class="bm-mfader app-bm-mfader"
+        data-mini-fader="${dataAttr}"
+        data-control
+        aria-label="${label}"
+      >
+        <div class="bm-mfader__track" aria-hidden="true">
+          <span class="bm-mfader__fill" data-mini-fader-fill aria-hidden="true"></span>
+          <div class="bm-mfader__thumb" data-mini-fader-handle>
+            <span class="bm-mfader__cap"></span>
+          </div>
         </div>
       </div>
       <span class="audio-fader-label">${label}</span>
@@ -41,13 +54,17 @@ function renderAudioFader(dataAttr: string, readoutKey: string, label: string): 
   `;
 }
 
-function renderStepper(stepperId: string, label: string, readoutKey: string, defaultText: string): string {
+function renderStepper(stepperId: string, label: string, readoutKey: string, _defaultText: string): string {
   return `
     <div class="stepper-cell" data-stepper="${stepperId}">
-      <div class="segmented stepper-segment" data-readout="${readoutKey}">${defaultText}</div>
+      ${renderSegReadout(readoutKey, "stepper-segment bm-seg--green")}
       <div class="stepper-buttons">
-        <button class="stepper-btn" data-stepper-up="${stepperId}" data-control aria-label="${label} up">▲</button>
-        <button class="stepper-btn" data-stepper-down="${stepperId}" data-control aria-label="${label} down">▼</button>
+        <button class="bm-stepper__btn stepper-btn" type="button" data-stepper-up="${stepperId}" data-control aria-label="${label} up">
+          <svg class="bm-stepper__glyph" viewBox="0 0 16 16" aria-hidden="true"><polygon points="8,3 14,12 2,12"/></svg>
+        </button>
+        <button class="bm-stepper__btn stepper-btn" type="button" data-stepper-down="${stepperId}" data-control aria-label="${label} down">
+          <svg class="bm-stepper__glyph" viewBox="0 0 16 16" aria-hidden="true"><polygon points="2,4 14,4 8,13"/></svg>
+        </button>
       </div>
       <span class="stepper-label">${label}</span>
     </div>
@@ -70,9 +87,11 @@ function renderColorGroup(group: PaintGroup, label: string, min: number, max: nu
           .map(
             (channel) => `
               <div class="color-column" data-color-input data-group="${group}" data-channel="${channel.key}">
-                <span class="readout-mini" data-color-readout>${defaultValue.toFixed(2)}</span>
+                <span class="bm-seg2 app-bm-seg-readout paint-value-seg bm-seg--green color-column-seg" data-color-readout data-seg-display>
+                  <span class="bm-seg2__display" data-seg-slots></span>
+                </span>
                 <div
-                  class="mini-fader color-vfader"
+                  class="mini-fader bm-mfader color-vfader app-bm-mini-fader"
                   data-control
                   data-vfader="color-${group}-${channel.key}"
                   data-min="${min}"
@@ -88,9 +107,11 @@ function renderColorGroup(group: PaintGroup, label: string, min: number, max: nu
                   <div class="mini-fader-scale">
                     <span>${formatScale(max)}</span><span></span><span>${formatScale(defaultValue)}</span><span></span><span></span><span>${formatScale(min)}</span>
                   </div>
-                  <div class="mini-fader-track"></div>
-                  <div class="mini-fader-handle" data-vfader-handle>
-                    <div class="mini-fader-cap"></div>
+                  <div class="bm-mfader__track">
+                    <span class="bm-mfader__fill" data-vfader-fill aria-hidden="true"></span>
+                    <div class="bm-mfader__thumb" data-vfader-handle>
+                      <span class="bm-mfader__cap"></span>
+                    </div>
                   </div>
                 </div>
                 <span class="color-tone color-tone-${channel.key}">${channel.tone}</span>
@@ -115,28 +136,34 @@ function renderColorHFader(
     <div class="color-extras-row">
       <div class="color-extras-meta">
         <span class="color-extras-label">${label}</span>
-        <span class="readout-mini" data-readout="${readoutKey}">${defaultValue.toFixed(2)}</span>
+        <span class="bm-seg2 app-bm-seg-readout paint-value-seg bm-seg--green color-extras-seg" data-readout="${readoutKey}" data-seg-display>
+          <span class="bm-seg2__display" data-seg-slots></span>
+        </span>
       </div>
-      <div
-        class="h-fader color-hfader"
-        data-control
-        data-hfader="${attr}"
-        data-min="${min}"
-        data-max="${max}"
-        data-default="${defaultValue}"
-        aria-label="${label}"
-        role="slider"
-        aria-valuemin="${min}"
-        aria-valuemax="${max}"
-        aria-valuenow="${defaultValue}"
-        tabindex="0"
-      >
+      <div class="h-fader color-hfader app-bm-hfader-inline" data-control style="--thumb-w:26px;--thumb-h:14px;--track-h:6px;">
         <div class="h-fader-scale">
           <span>${formatScale(min)}</span><span></span><span>${formatScale(defaultValue)}</span><span></span><span></span><span>${formatScale(max)}</span>
         </div>
-        <div class="h-fader-track"></div>
-        <div class="h-fader-handle" data-hfader-handle>
-          <div class="h-fader-cap"></div>
+        <div
+          class="bm-fader__channel color-hfader__channel"
+          data-hfader="${attr}"
+          data-min="${min}"
+          data-max="${max}"
+          data-default="${defaultValue}"
+          aria-label="${label}"
+          role="slider"
+          aria-valuemin="${min}"
+          aria-valuemax="${max}"
+          aria-valuenow="${defaultValue}"
+          tabindex="0"
+        >
+          <div class="bm-fader__track">
+            <span class="bm-fader__meter" aria-hidden="true" style="--meter:0"></span>
+            <span class="bm-fader__ticks" aria-hidden="true"></span>
+          </div>
+          <div class="bm-fader__thumb" data-hfader-handle>
+            <span class="bm-fader__cap"></span>
+          </div>
         </div>
       </div>
     </div>
@@ -157,18 +184,28 @@ export function isIosLikeWebBluetoothBlocked(): boolean {
   return false;
 }
 
-/** Show Bluefy install prompt once modal is in the DOM (iOS + no Web Bluetooth only). */
-export function initBluefyOfferModal(root: HTMLElement): void {
+const bluefyModalCloseRef: { current?: () => void } = { current: undefined };
+
+function wireBluefyOfferBackdropOnce(backdrop: HTMLElement): void {
+  if (backdrop.dataset.bluefyWired === "1") return;
+  backdrop.dataset.bluefyWired = "1";
+  const requestClose = (): void => {
+    bluefyModalCloseRef.current?.();
+  };
+  backdrop.querySelector("[data-bluefy-dismiss]")?.addEventListener("click", requestClose);
+  backdrop.addEventListener("click", (e) => {
+    if (e.target === backdrop) requestClose();
+  });
+}
+
+/** Open the Bluefy install / Web Bluetooth help dialog (iOS-like browsers). */
+export function showBluefyOfferModal(root: HTMLElement): void {
   const backdrop = root.querySelector<HTMLElement>("[data-bluefy-modal-root]");
   if (!backdrop) return;
-  if (typeof sessionStorage !== "undefined") {
-    try {
-      if (sessionStorage.getItem(BLUEFY_MODAL_DISMISS_KEY) === "1") return;
-    } catch {
-      /* ignore (e.g. private mode) */
-    }
-  }
+  wireBluefyOfferBackdropOnce(backdrop);
+  bluefyModalCloseRef.current?.();
 
+  let onKeyDown: ((e: KeyboardEvent) => void) | undefined;
   const close = (): void => {
     backdrop.hidden = true;
     document.body.classList.remove("bluefy-modal-open");
@@ -179,21 +216,91 @@ export function initBluefyOfferModal(root: HTMLElement): void {
         /* ignore */
       }
     }
-    document.removeEventListener("keydown", onKeyDown);
+    if (onKeyDown) document.removeEventListener("keydown", onKeyDown);
+    bluefyModalCloseRef.current = undefined;
   };
 
-  const onKeyDown = (e: KeyboardEvent): void => {
-    if (e.key === "Escape") close();
-  };
-
+  bluefyModalCloseRef.current = close;
   backdrop.hidden = false;
   document.body.classList.add("bluefy-modal-open");
-
-  backdrop.querySelector("[data-bluefy-dismiss]")?.addEventListener("click", close);
-  backdrop.addEventListener("click", (e) => {
-    if (e.target === backdrop) close();
-  });
+  onKeyDown = (e: KeyboardEvent): void => {
+    if (e.key === "Escape") close();
+  };
   document.addEventListener("keydown", onKeyDown);
+}
+
+/** Auto-open Bluefy prompt once per session on first load (iOS + no Web Bluetooth). */
+export function initBluefyOfferModal(root: HTMLElement): void {
+  const backdrop = root.querySelector<HTMLElement>("[data-bluefy-modal-root]");
+  if (!backdrop) return;
+  if (typeof sessionStorage !== "undefined") {
+    try {
+      if (sessionStorage.getItem(BLUEFY_MODAL_DISMISS_KEY) === "1") return;
+    } catch {
+      /* ignore (e.g. private mode) */
+    }
+  }
+  showBluefyOfferModal(root);
+}
+
+const genericBleHelpCloseRef: { current?: () => void } = { current: undefined };
+
+function wireGenericWebBleHelpBackdropOnce(backdrop: HTMLElement): void {
+  if (backdrop.dataset.genericBleHelpWired === "1") return;
+  backdrop.dataset.genericBleHelpWired = "1";
+  const requestClose = (): void => {
+    genericBleHelpCloseRef.current?.();
+  };
+  backdrop.querySelector("[data-web-ble-generic-dismiss]")?.addEventListener("click", requestClose);
+  backdrop.addEventListener("click", (e) => {
+    if (e.target === backdrop) requestClose();
+  });
+}
+
+/** Open plain-language Web Bluetooth help (non–iOS-like browsers without BLE). */
+export function showGenericWebBleHelpModal(root: HTMLElement): void {
+  const backdrop = root.querySelector<HTMLElement>("[data-web-ble-generic-modal-root]");
+  if (!backdrop) return;
+  wireGenericWebBleHelpBackdropOnce(backdrop);
+  genericBleHelpCloseRef.current?.();
+
+  const bodyEl = backdrop.querySelector("[data-web-ble-generic-body]");
+  if (bodyEl) bodyEl.textContent = webBluetoothUnsupportedDetail();
+
+  let onKeyDown: ((e: KeyboardEvent) => void) | undefined;
+  const close = (): void => {
+    backdrop.hidden = true;
+    if (onKeyDown) document.removeEventListener("keydown", onKeyDown);
+    genericBleHelpCloseRef.current = undefined;
+  };
+
+  genericBleHelpCloseRef.current = close;
+  backdrop.hidden = false;
+  onKeyDown = (e: KeyboardEvent): void => {
+    if (e.key === "Escape") close();
+  };
+  document.addEventListener("keydown", onKeyDown);
+}
+
+function renderGenericWebBleHelpModal(): string {
+  return `
+    <div class="relay-modal-backdrop" data-web-ble-generic-modal-root hidden>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="web-ble-generic-title"
+        class="relay-modal"
+      >
+        <h2 id="web-ble-generic-title" class="relay-modal-title">Web Bluetooth unavailable</h2>
+        <p class="relay-modal-body" data-web-ble-generic-body></p>
+        <div class="relay-modal-actions">
+          <button type="button" class="bm-btn connect-primary" data-web-ble-generic-dismiss data-control>
+            OK
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 function renderBluefyOfferModal(): string {
@@ -217,7 +324,7 @@ function renderBluefyOfferModal(): string {
             target="_blank"
             rel="noopener noreferrer"
           >Get Bluefy on the App Store</a>
-          <button type="button" class="bluefy-modal-dismiss" data-bluefy-dismiss>Not now</button>
+          <button type="button" class="bm-btn bluefy-modal-dismiss" data-bluefy-dismiss>Not now</button>
         </div>
       </div>
     </div>
@@ -242,308 +349,384 @@ export function webBluetoothUnsupportedDetail(): string {
   return "Use Google Chrome or Microsoft Edge on Windows, macOS, or Android with Bluetooth. Firefox and most non-Chromium browsers do not support Web Bluetooth.";
 }
 
-export function renderPanelTemplate(isSupported: boolean): string {
-  const channelLabel = (channel: PaintChannel): string =>
-    channel === "luma" ? "Y" : channel.charAt(0).toUpperCase();
-  const channelClass = (channel: PaintChannel): string => (channel === "luma" ? "luma" : channel);
+// ---------------------------------------------------------------------------
+// View navigation — split the panel into self-contained mobile-first views.
+// ---------------------------------------------------------------------------
 
-  const paintKnobs = PAINT_GROUPS.flatMap((group) =>
-    PAINT_CHANNELS.map(
-      (channel) => `
-        <div class="knob-cell" data-paint-cell data-group="${group}" data-channel="${channel}" data-control>
-          <div class="knob knob-${channelClass(channel)}" data-knob>
-            <div class="knob-indicator" data-knob-indicator></div>
-          </div>
-          <div class="knob-meta">
-            <span class="knob-label">${group} ${channelLabel(channel)}</span>
-            <span class="knob-value" data-paint-value>0.00</span>
-          </div>
-        </div>
-      `,
-    ),
-  ).join("");
+export const VIEW_IDS = ["connect", "settings", "iris", "audio", "video", "color", "debug"] as const;
+export type ViewId = (typeof VIEW_IDS)[number];
 
+/** Views where the persistent scene file bar is visible above the bottom nav. */
+export const SCENE_BAR_VIEWS: ReadonlySet<ViewId> = new Set<ViewId>([
+  "settings",
+  "iris",
+  "audio",
+  "video",
+  "color",
+]);
+
+const VIEW_LABELS: Record<ViewId, string> = {
+  connect: "Connect",
+  settings: "Settings",
+  iris: "Iris",
+  audio: "Audio",
+  video: "Video",
+  color: "Color",
+  debug: "Debug",
+};
+
+/**
+ * Compact mono SVG glyphs that read as machined panel labels rather than
+ * decorative emoji. Each inherits text color and stays crisp at any DPR.
+ */
+const VIEW_ICONS: Record<ViewId, string> = {
+  connect: `<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M8 1.5v6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M4.6 4.4a4.6 4.6 0 1 0 6.8 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`,
+  settings: `<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M2 4h6M11 4h3M2 8h3M8 8h6M2 12h8M13 12h1" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="9.5" cy="4" r="1.6" fill="currentColor"/><circle cx="6.5" cy="8" r="1.6" fill="currentColor"/><circle cx="11.5" cy="12" r="1.6" fill="currentColor"/></svg>`,
+  iris: `<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="8" cy="8" r="2" fill="currentColor"/><path d="M8 2.2 11 8 8 13.8 5 8z" fill="none" stroke="currentColor" stroke-width="1"/></svg>`,
+  audio: `<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3 6h2.5L9 3v10L5.5 10H3z" fill="currentColor"/><path d="M11 5.4c1 .8 1 4.4 0 5.2M12.6 4c1.6 1.4 1.6 6.6 0 8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>`,
+  video: `<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect x="2" y="4" width="9" height="8" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="m11 7 3-1.6v5.2L11 9z" fill="currentColor"/></svg>`,
+  color: `<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.2"/><circle cx="8" cy="5" r="2" fill="#ff6b66"/><circle cx="5.5" cy="9.5" r="2" fill="#76e26a"/><circle cx="10.5" cy="9.5" r="2" fill="#5ea4ff" fill-opacity="0.85"/></svg>`,
+  debug: `<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M4.5 6h0M4.5 8.5h0M7 8.5h5M7 11h3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="4.5" cy="6" r="0.7" fill="currentColor"/></svg>`,
+};
+
+/**
+ * Legacy data attributes wired onto the corresponding nav tab so older
+ * code paths and tests that reach for `[data-video-toggle]` /
+ * `[data-audio-toggle]` continue to find a clickable element.
+ */
+const VIEW_LEGACY_ALIAS: Partial<Record<ViewId, string>> = {
+  video: "data-video-toggle",
+  audio: "data-audio-toggle",
+};
+
+function renderViewNav(): string {
   return `
-    <main class="panel-app">
-      <header class="panel-hero">
-        <div>
-          <p class="eyebrow">Blackmagic Camera Control</p>
-          <h1>Camera Control Panel</h1>
-          <p data-support class="${isSupported ? "ok" : "warn"}">
-            Web Bluetooth ${isSupported ? "is available" : "is not available"} in this browser.
-          </p>
-          ${
-            isSupported
-              ? ""
-              : `<p data-support-detail class="warn support-detail">${webBluetoothUnsupportedDetail()}</p>`
-          }
+    <nav class="view-nav" role="tablist" aria-label="Camera control sections" data-view-nav>
+      ${VIEW_IDS.map((id, idx) => {
+        const alias = VIEW_LEGACY_ALIAS[id] ? ` ${VIEW_LEGACY_ALIAS[id]}` : "";
+        return `
+          <button
+            class="view-nav-tab${idx === 0 ? " is-active" : ""}"
+            type="button"
+            role="tab"
+            id="tab-${id}"
+            data-view-switch="${id}"${alias}
+            aria-controls="view-${id}"
+            aria-selected="${idx === 0 ? "true" : "false"}"
+            tabindex="${idx === 0 ? "0" : "-1"}"
+          >
+            <span class="view-nav-icon">${VIEW_ICONS[id]}</span>
+            <span class="view-nav-label">${VIEW_LABELS[id]}</span>
+          </button>
+        `;
+      }).join("")}
+    </nav>
+  `;
+}
+
+function renderAppHeader(bleAvailable: boolean): string {
+  return `
+    <header class="app-header" data-app-header>
+      <div class="app-header-brand">
+        <span class="app-header-eyebrow">BM Camera</span>
+        <p data-connection class="pill app-header-pill">Disconnected</p>
+      </div>
+      <div class="app-header-meta">
+        <span class="app-header-cam" data-cam-badge aria-label="Selected camera" role="status">
+          <span class="app-header-cam-label">CAM</span>
+          <span class="app-header-cam-digit" data-cam-badge-digit>—</span>
+        </span>
+        <div class="app-header-leds" aria-label="Connection status">
+          <span class="footer-led" data-led="connected">NET</span>
+          <span class="footer-led" data-led="paired">PAIR</span>
+          <span class="footer-led" data-led="recording">REC</span>
         </div>
-        <div class="connection-controls">
-          <p data-connection class="pill">Disconnected</p>
-          <div class="button-row">
-            <button data-connect ${isSupported ? "" : "disabled"}>Connect</button>
-            <button data-disconnect data-control>Disconnect</button>
-            <button data-power data-control class="power-btn" aria-pressed="false">
+        <button class="bm-btn app-header-panel-active footer-btn" type="button" data-panel-active data-control aria-pressed="true" title="Panel Active — when off, controls are muted">
+          <span class="footer-btn-label">PANEL</span>
+        </button>
+      </div>
+      ${
+        bleAvailable
+          ? ""
+          : `<p data-support-detail class="warn support-detail app-header-support">${webBluetoothUnsupportedDetail()}</p>`
+      }
+    </header>
+  `;
+}
+
+function renderConnectView(bleAvailable: boolean): string {
+  return `
+    <section class="view view--connect" data-view="connect" id="view-connect" role="tabpanel" aria-labelledby="tab-connect">
+      <div class="card connect-card">
+        <div class="connect-status">
+          <p class="eyebrow">Camera link</p>
+          <h2 class="connect-status-title">${bleAvailable ? "Pair a Blackmagic camera" : "Bluetooth unavailable"}</h2>
+        </div>
+        <div class="connection-controls connect-controls">
+          <div class="connect-button-row">
+            <button class="bm-btn connect-primary" type="button" data-connect-toggle>
+              Connect
+            </button>
+            <button class="bm-btn" type="button" data-relay-join-toggle>Join</button>
+            <button class="bm-btn" type="button" data-relay-share-toggle data-control>Share</button>
+            <button class="bm-btn power-btn" type="button" data-power data-control aria-pressed="false">
               <span class="power-led"></span>
               <span data-power-label>Power On</span>
             </button>
           </div>
           <label class="auto-reconnect-toggle">
             <input data-auto-reconnect type="checkbox" checked />
-            Auto-reconnect on drop
+            Auto-reconnect (BLE drop, relay join drop/reload)
           </label>
-        </div>
-      </header>
-
-      <section class="chassis">
-        <div class="chassis-row stepper-row">
-          ${renderStepper("wb", "White Bal", "wb", "5600")}
-          ${renderStepper("tint", "Tint", "tint", "0")}
-          ${renderStepper("gain", "Master Gain", "gain", "0.0")}
-          ${renderStepper("iso", "ISO", "iso", "----")}
-          ${renderStepper("shutter", "Shutter", "shutter", "0180")}
-          ${renderStepper("nd", "ND Stops", "nd", "--")}
-          <div class="stepper-cell auto-exp-cell">
-            <button class="auto-exp-btn" data-auto-exp data-control aria-pressed="false">
-              <span class="auto-exp-led"></span>
-              <span class="auto-exp-text" data-readout="autoexp">MANUAL</span>
-            </button>
-            <span class="stepper-label">Auto Exp</span>
-          </div>
-          <div class="stepper-cell unit-btn-cell">
-            <span class="unit-btn-indicator">ABS</span>
-            <span class="unit-btn-led" data-wb-led></span>
-            <button class="unit-btn" data-video-set-auto-wb data-control aria-label="Set auto white balance">W/B</button>
-            <span class="stepper-label">White Bal</span>
-          </div>
-          <div class="stepper-cell unit-btn-cell">
-            <span class="unit-btn-indicator">BARS</span>
-            <span class="unit-btn-led" data-bars-led></span>
-            <button
-              class="unit-btn"
-              type="button"
-              data-color-bars
-              data-control
-              aria-label="Color bars — hold 1s to enable, tap to disable"
-            >BARS</button>
-            <span class="stepper-label">Color Bars</span>
+          <p class="connect-relay-hint">
+            Connect pairs over Bluetooth; Join opens remote sessions when you are not the BLE host. The same hub buttons switch to Disconnect, Leave, or Stop sharing when active.
+          </p>
+          <div class="relay-sessions-inline" data-relay-sessions-inline hidden>
+            <h3 class="relay-sessions-inline-title">Hosted sessions</h3>
+            <ul class="relay-session-list relay-session-list--inline" data-relay-session-list-inline aria-live="polite"></ul>
+            <p class="relay-session-empty muted" data-relay-inline-empty hidden></p>
           </div>
         </div>
+      </div>
 
-        <div class="chassis-row camera-row">
-          <div class="paint-area">
-            <div class="paint-knobs">${paintKnobs}</div>
-            <div class="paint-actions">
-              <span class="paint-actions-hint">Drag knobs to adjust. Y = luma (master).</span>
-              <div class="paint-actions-buttons">
-                <button data-color-adv data-control class="adv-btn" aria-pressed="false" aria-controls="color-card">
-                  ADV
-                </button>
-                <button data-color-reset data-control>Color Reset</button>
-              </div>
+      <div class="card connect-camera-picker" data-connect-camera-id-card hidden>
+        <div class="card-header">
+          <h2>Camera ID</h2>
+          <span class="readout-label">Slate &amp; destination</span>
+        </div>
+        <div class="camera-pillar camera-pillar--picker" data-camera-pillar role="listbox" aria-label="Select camera">
+          ${Array.from({ length: CAMERA_COUNT }, (_, index) => {
+            const id = index + 1;
+            return `
+              <button
+                class="cam-led"
+                data-camera-led
+                data-camera-id="${id}"
+                data-control
+                role="option"
+                aria-label="Camera ${id}"
+              >
+                <span class="cam-led-digit">${id}</span>
+              </button>
+            `;
+          }).join("")}
+          <span class="iris-label">CAMERA</span>
+        </div>
+        <p class="connect-camera-hint">Tap a number to set the broadcast ID and command destination. Stored automatically.</p>
+      </div>
+    </section>
+  `;
+}
+
+function renderSettingsView(): string {
+  return `
+    <section class="view view--settings" data-view="settings" id="view-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
+      <div class="chassis chassis--single settings-chassis">
+        <div class="settings-stage">
+          <div class="chassis-row stepper-row settings-steppers" aria-label="Exposure and colour steppers">
+            ${renderStepper("wb", "White Bal", "wb", "5600")}
+            ${renderStepper("tint", "Tint", "tint", "0")}
+            ${renderStepper("gain", "Master Gain", "gain", "0.0")}
+            ${renderStepper("iso", "ISO", "iso", "----")}
+            ${renderStepper("shutter", "Shutter", "shutter", "0180")}
+            ${renderStepper("nd", "ND Stops", "nd", "--")}
+          </div>
+          <div class="settings-buttons" role="group" aria-label="Auto exposure and program keys">
+            <div class="stepper-cell auto-exp-cell">
+              <button class="bm-btn auto-exp-btn" type="button" data-auto-exp data-control aria-pressed="false" title="Cycle: Manual → Iris → Shutter → Iris+Shutter → Shutter+Iris">
+                <span class="auto-exp-led"></span>
+                ${renderSegReadout("autoexp", "auto-exp-seg bm-seg--green", 'role="status"', "span")}
+              </button>
+              <span class="stepper-label">Auto Exp</span>
+            </div>
+            <div class="stepper-cell unit-btn-cell">
+              <span class="unit-btn-indicator">ABS</span>
+              <span class="unit-btn-led" data-wb-led></span>
+              <button class="bm-btn unit-btn" type="button" data-video-set-auto-wb data-control aria-label="Set auto white balance">W/B</button>
+              <span class="stepper-label">White Bal</span>
+            </div>
+            <div class="stepper-cell unit-btn-cell">
+              <span class="unit-btn-indicator">BARS</span>
+              <span class="unit-btn-led" data-bars-led></span>
+              <button
+                class="bm-btn unit-btn"
+                type="button"
+                data-color-bars
+                data-control
+                aria-label="Color bars — hold 1s to enable, tap to disable"
+              >BARS</button>
+              <span class="stepper-label">Color Bars</span>
+            </div>
+            <div class="stepper-cell unit-btn-cell">
+              <span class="unit-btn-indicator">RTN</span>
+              <span class="unit-btn-led" data-program-return-led></span>
+              <button
+                class="bm-btn unit-btn"
+                type="button"
+                data-program-return-feed
+                data-control
+                aria-label="Program return feed — hold 3s to show program on monitor, tap when lit to turn off"
+              >RTN</button>
+              <span class="stepper-label">Pgm Return</span>
             </div>
           </div>
         </div>
+      </div>
+    </section>
+  `;
+}
 
-        <div class="chassis-row scene-file-row">
-          <span class="scene-file-label">SCENE FILE</span>
-          <div class="scene-file-banks" data-scene-banks>
-            ${Array.from({ length: 5 }, (_, index) => {
-              const slot = index;
-              return `
-                <button
-                  class="scene-bank"
-                  data-scene-bank
-                  data-bank-slot="${slot}"
-                  data-control
-                  aria-label="Scene file ${slot + 1}"
-                  aria-pressed="false"
-                >
-                  <span class="scene-bank-label">${slot + 1}</span>
-                  <span class="scene-bank-led"></span>
-                </button>
-              `;
-            }).join("")}
+function renderIrisView(): string {
+  return `
+    <section class="view view--iris" data-view="iris" id="view-iris" role="tabpanel" aria-labelledby="tab-iris" hidden>
+      <div class="iris-stage">
+        <div class="iris-status">
+          <div class="iris-status-main">
+            ${renderSegReadout("iris", "iris-status-fstop bm-seg--green", 'role="status"')}
+            <span class="readout-label">IRIS</span>
           </div>
-          <button class="scene-store" data-scene-store data-control aria-pressed="false">
-            STORE
-          </button>
+          <div class="iris-status-tally">
+            <span class="tally-dot tally-pgm" data-tally="program">PGM</span>
+            <span class="tally-dot tally-pvw" data-tally="preview">PVW</span>
+            <span class="readout-label iris-status-tally-label">TALLY</span>
+          </div>
         </div>
 
-        <div class="chassis-row iris-row">
-          <div class="iris-left">
-            <div class="camera-pillar" data-camera-pillar role="listbox" aria-label="Select camera">
-              ${Array.from({ length: CAMERA_COUNT }, (_, index) => {
-                const id = index + 1;
-                return `
-                  <button
-                    class="cam-led"
-                    data-camera-led
-                    data-camera-id="${id}"
-                    data-control
-                    role="option"
-                    aria-label="Camera ${id}"
-                  >
-                    <span class="cam-led-digit">${id}</span>
-                  </button>
-                `;
-              }).join("")}
-              <span class="iris-label">CAMERA</span>
-            </div>
-
-            <div class="iris-readouts">
-              <div class="readout-block">
-                <div class="segmented big" data-readout="iris">F--</div>
-                <span class="readout-label">IRIS</span>
-              </div>
-              <div class="readout-block">
-                <div class="segmented big" data-readout="masterBlackReadout">0.0</div>
-                <span class="readout-label">MASTER BLACK</span>
-              </div>
-              <div class="readout-block">
-                <div class="segmented" data-readout="focus">--</div>
-                <span class="readout-label">FOCUS</span>
-              </div>
-              <div class="readout-block">
-                <div class="segmented" data-readout="format">---</div>
-                <span class="readout-label">FORMAT</span>
-              </div>
-              <div class="readout-block">
-                <div class="segmented" data-readout="codec">---</div>
-                <span class="readout-label">CODEC</span>
-              </div>
-              <div class="readout-block">
-                <div class="segmented" data-readout="tintReadout">0</div>
-                <span class="readout-label">TINT</span>
-              </div>
-              <div class="readout-block">
-                <div class="segmented" data-readout="ndReadout">--</div>
-                <span class="readout-label">ND</span>
-              </div>
-              <div class="readout-block tally-block">
-                <div class="tally-dots">
-                  <span class="tally-dot tally-pgm" data-tally="program">PGM</span>
-                  <span class="tally-dot tally-pvw" data-tally="preview">PVW</span>
-                </div>
-                <span class="readout-label">TALLY</span>
-              </div>
-            </div>
-          </div>
-
-          <div class="iris-center">
-            <div class="iris-wheel">
-              <div class="iris-wheel-ring"></div>
-              <div class="iris-wheel-knob" data-iris-wheel>
-                <div class="iris-wheel-marker" data-iris-wheel-marker></div>
-              </div>
-              <span class="iris-wheel-label">MASTER BLACK</span>
-            </div>
-            <div class="iris-coarse">
-              <span class="iris-coarse-label close">-2.0</span>
-              <span class="iris-coarse-divider"></span>
-              <span class="iris-coarse-label open">+2.0</span>
-            </div>
-            <div class="focus-fader-wrapper">
-              <span class="focus-fader-label">FOCUS</span>
-              <div class="h-fader" data-h-fader="focus" data-control aria-label="Focus (horizontal drag)">
-                <div class="h-fader-scale">
-                  <span>NEAR</span>
-                  <span></span>
-                  <span></span>
-                  <span></span>
-                  <span></span>
-                  <span>FAR</span>
-                </div>
-                <div class="h-fader-track"></div>
-                <div class="h-fader-handle" data-h-fader-handle>
-                  <div class="h-fader-cap"></div>
+        <div class="iris-stage-grid">
+          <div class="iris-primary">
+            <div class="bm-tbar app-bm-iris-tbar iris-joystick iris-joystick--xl" data-iris-joystick data-control aria-label="Iris (vertical drag)">
+              <div class="bm-tbar__shaft" aria-hidden="true">
+                <span class="bm-tbar__ticks bm-tbar__ticks--left"></span>
+                <span class="bm-tbar__ticks bm-tbar__ticks--right"></span>
+                <span class="bm-tbar__ladder"></span>
+                <span class="bm-tbar__slot"></span>
+                <div class="iris-joystick-scale app-bm-iris-tbar-scale">
+                  <span>L</span>
+                  <span>8.0</span>
+                  <span>11</span>
+                  <span>16</span>
+                  <span>22</span>
+                  <span>CLS</span>
                 </div>
               </div>
-            </div>
-          </div>
-
-          <div class="iris-fader-column">
-            <div class="iris-joystick" data-iris-joystick data-control aria-label="Iris (vertical drag)">
-              <div class="iris-joystick-scale">
-                <span>L</span>
-                <span>8.0</span>
-                <span>11</span>
-                <span>16</span>
-                <span>22</span>
-                <span>CLS</span>
-              </div>
-              <div class="iris-joystick-track"></div>
-              <div class="iris-joystick-handle" data-iris-joystick-handle>
-                <div class="iris-joystick-stick"></div>
-                <div class="iris-joystick-cap"></div>
+              <div
+                class="bm-tbar__handle"
+                data-iris-joystick-handle
+                role="slider"
+                tabindex="0"
+                aria-valuemin="0"
+                aria-valuemax="1"
+                aria-orientation="vertical"
+                aria-label="Iris"
+                aria-valuenow="50"
+              >
+                <span class="bm-tbar__cap"></span>
+                <span class="bm-tbar__bar"></span>
               </div>
             </div>
             <span class="iris-label">IRIS</span>
           </div>
 
           <div class="iris-side-buttons">
-            <button class="side-btn" data-iris-mb-active data-control>IRIS/MB<br />ACTIVE</button>
-            <button class="side-btn" data-auto-aperture data-control>AUTO<br />IRIS</button>
-            <button class="side-btn" data-autofocus data-control>AUTO<br />FOCUS</button>
-            <button class="side-btn record-btn" data-record-start data-control>REC</button>
-            <button class="side-btn stop-btn" data-record-stop data-control>STOP</button>
-            <button class="side-btn" data-still-capture data-control>STILL</button>
+            <button class="bm-btn side-btn" type="button" data-iris-mb-active data-control>IRIS/MB<br />ACTIVE</button>
+            <button class="bm-btn side-btn" type="button" data-auto-aperture data-control>AUTO<br />IRIS</button>
+            <button class="bm-btn side-btn" type="button" data-autofocus data-control>AUTO<br />FOCUS</button>
             <button
-              class="side-btn bars-btn"
+              class="bm-btn bm-btn--call side-btn"
               type="button"
-              data-program-return-feed
+              data-record-start
               data-control
-              aria-label="Program return feed — hold 3s to show program on monitor, tap when lit to turn off"
+              aria-pressed="false"
+              aria-label="Start recording"
             >
-              <span class="side-btn-led" data-program-return-led></span>
-              PGM<br />RET
+              REC
             </button>
+            <button class="bm-btn side-btn" type="button" data-record-stop data-control>STOP</button>
+            <button class="bm-btn side-btn" type="button" data-still-capture data-control>STILL</button>
+            <button class="bm-btn side-btn" type="button" data-preview data-control>PREVIEW</button>
+            <button class="bm-btn side-btn" type="button" data-call data-control>CALL</button>
           </div>
         </div>
 
-        <div class="chassis-row panel-footer-row">
-          <div class="footer-buttons">
-            <button class="footer-btn" data-panel-active data-control>
-              <span class="footer-btn-label">PANEL<br />ACTIVE</span>
-            </button>
-            <div class="footer-leds">
-              <span class="footer-led" data-led="connected">NETWORK</span>
-              <span class="footer-led" data-led="recording">ALARM</span>
-              <span class="footer-led" data-led="paired">CABLE</span>
+        <div class="iris-secondary">
+          <div class="knob-cell iris-mb-cell" data-iris-mb-cell>
+            <div class="iris-mb-bm-pot bm-pot">
+              <div
+                class="bm-pot__knob iris-mb-knob"
+                data-iris-wheel
+                data-control
+                role="slider"
+                aria-label="Master black"
+                aria-valuemin="-2"
+                aria-valuemax="2"
+                aria-valuenow="0"
+                tabindex="0"
+                style="--angle: 0deg;"
+              >
+                <span class="bm-pot__indicator" aria-hidden="true"></span>
+              </div>
+            </div>
+            <div class="knob-meta">
+              <span class="knob-label">Master Black</span>
+              <span class="knob-value" data-readout="masterBlackReadout">+0.00</span>
             </div>
           </div>
-          <div class="footer-buttons-right">
-            <button class="footer-btn" data-video-toggle data-control aria-pressed="false" aria-controls="video-card">VIDEO</button>
-            <button class="footer-btn" data-audio-toggle data-control aria-pressed="false" aria-controls="audio-card">AUDIO</button>
-            <button class="footer-btn" data-preview data-control>PREVIEW</button>
-            <button class="footer-btn" data-call data-control>CALL</button>
+
+          <div class="iris-focus-cell" data-iris-focus-cell data-active="false">
+            <div class="iris-focus-head">
+              <span class="iris-focus-title">FOCUS</span>
+              <button
+                class="bm-btn iris-focus-toggle"
+                type="button"
+                data-iris-focus-toggle
+                aria-pressed="false"
+                aria-label="Toggle focus control active"
+              >
+                <span class="iris-focus-toggle-led"></span>
+                <span>ACTIVE</span>
+              </button>
+              ${renderSegReadout("focus", "iris-focus-readout bm-seg--green", 'role="status"')}
+            </div>
+            <div class="h-fader iris-focus-fader app-bm-hfader-inline" data-control aria-label="Focus (horizontal drag)" style="--thumb-w:26px;--thumb-h:14px;--track-h:6px;">
+              <div class="h-fader-scale">
+                <span>NEAR</span>
+                <span></span>
+                <span></span>
+                <span></span>
+                <span></span>
+                <span>FAR</span>
+              </div>
+              <div class="bm-fader__channel iris-focus-fader__channel" data-h-fader="focus">
+                <div class="bm-fader__track">
+                  <span class="bm-fader__meter" aria-hidden="true" style="--meter:0"></span>
+                  <span class="bm-fader__ticks" aria-hidden="true"></span>
+                </div>
+                <div class="bm-fader__thumb" data-h-fader-handle>
+                  <span class="bm-fader__cap"></span>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
-      </section>
 
-      <section class="card color-card" data-color-card id="color-card" hidden>
-        <div class="card-header">
-          <h2>Color Correction</h2>
-          <button data-color-reset-card data-control>Reset</button>
+        <div class="iris-info-strip" aria-label="Camera info">
+          <span><em>FORMAT</em><b data-readout="format">---</b></span>
+          <span><em>CODEC</em><b data-readout="codec">---</b></span>
+          <span><em>ND</em><b data-readout="ndReadout">--</b></span>
+          <span><em>TINT</em><b data-readout="tintReadout">0</b></span>
         </div>
-        <div class="card-body color-body">
-          ${renderColorGroup("lift", "Lift", -2, 2, 0)}
-          ${renderColorGroup("gamma", "Gamma", -4, 4, 0)}
-          ${renderColorGroup("gain", "Gain", 0, 16, 1)}
-          <div class="color-extras">
-            ${renderColorHFader("contrast-pivot", "Contrast pivot", 0, 1, 0.5, "contrastPivot")}
-            ${renderColorHFader("contrast-adjust", "Contrast adjust", 0, 2, 1, "contrastAdjust")}
-            ${renderColorHFader("luma-mix", "Luma mix", 0, 1, 1, "lumaMix")}
-            ${renderColorHFader("hue", "Hue", -1, 1, 0, "hue")}
-            ${renderColorHFader("saturation", "Saturation", 0, 2, 1, "saturation")}
-          </div>
-        </div>
-      </section>
+      </div>
+    </section>
+  `;
+}
 
-      <section class="card audio-card" data-audio-card id="audio-card" hidden>
+function renderAudioView(): string {
+  return `
+    <section class="view view--audio" data-view="audio" id="view-audio" role="tabpanel" aria-labelledby="tab-audio" hidden>
+      <section class="card audio-card" data-audio-card id="audio-card">
         <div class="card-header">
           <h2>Audio</h2>
-          <button data-audio-reset data-control>Reset</button>
+          <button class="bm-btn" type="button" data-audio-reset data-control>Reset</button>
         </div>
         <div class="card-body audio-body">
           <p class="audio-note">Live signal metering isn't exposed over Bluetooth - sliders show configured gain only.</p>
@@ -577,8 +760,14 @@ export function renderPanelTemplate(isSupported: boolean): string {
           </div>
         </div>
       </section>
+    </section>
+  `;
+}
 
-      <section class="card video-card" data-video-card id="video-card" hidden>
+function renderVideoView(): string {
+  return `
+    <section class="view view--video" data-view="video" id="view-video" role="tabpanel" aria-labelledby="tab-video" hidden>
+      <section class="card video-card" data-video-card id="video-card">
         <div class="card-header">
           <h2>Video</h2>
         </div>
@@ -586,27 +775,27 @@ export function renderPanelTemplate(isSupported: boolean): string {
           <div class="video-row">
             <span class="video-row-label">Auto white balance</span>
             <div class="video-row-actions">
-              <button data-video-set-auto-wb data-control>SET AUTO WB</button>
-              <button data-video-restore-auto-wb data-control>RESTORE AUTO WB</button>
+              <button class="bm-btn" type="button" data-video-set-auto-wb data-control>SET AUTO WB</button>
+              <button class="bm-btn" type="button" data-video-restore-auto-wb data-control>RESTORE AUTO WB</button>
             </div>
           </div>
 
           <div class="video-row">
             <span class="video-row-label">Dynamic range</span>
             <div class="segmented-group" role="radiogroup" data-video-dynamic-range>
-              <button class="segmented-option" data-control data-value="0" role="radio" aria-checked="false">Film</button>
-              <button class="segmented-option" data-control data-value="1" role="radio" aria-checked="false">Video</button>
-              <button class="segmented-option" data-control data-value="2" role="radio" aria-checked="false">Extended Video</button>
+              <button class="segmented-option" type="button" data-control data-value="0" role="radio" aria-checked="false">Film</button>
+              <button class="segmented-option" type="button" data-control data-value="1" role="radio" aria-checked="false">Video</button>
+              <button class="segmented-option" type="button" data-control data-value="2" role="radio" aria-checked="false">Extended Video</button>
             </div>
           </div>
 
           <div class="video-row">
             <span class="video-row-label">Sharpening</span>
             <div class="segmented-group" role="radiogroup" data-video-sharpening>
-              <button class="segmented-option" data-control data-value="0" role="radio" aria-checked="false">Off</button>
-              <button class="segmented-option" data-control data-value="1" role="radio" aria-checked="false">Low</button>
-              <button class="segmented-option" data-control data-value="2" role="radio" aria-checked="false">Medium</button>
-              <button class="segmented-option" data-control data-value="3" role="radio" aria-checked="false">High</button>
+              <button class="segmented-option" type="button" data-control data-value="0" role="radio" aria-checked="false">Off</button>
+              <button class="segmented-option" type="button" data-control data-value="1" role="radio" aria-checked="false">Low</button>
+              <button class="segmented-option" type="button" data-control data-value="2" role="radio" aria-checked="false">Medium</button>
+              <button class="segmented-option" type="button" data-control data-value="3" role="radio" aria-checked="false">High</button>
             </div>
           </div>
 
@@ -626,18 +815,6 @@ export function renderPanelTemplate(isSupported: boolean): string {
             </label>
           </div>
 
-          <div class="video-row video-row-grid">
-            <span class="video-row-label">Exposure</span>
-            <div class="stepper-cell" data-stepper="exposure">
-              <div class="segmented stepper-segment" data-readout="exposureUs">----</div>
-              <div class="stepper-buttons">
-                <button class="stepper-btn" data-stepper-up="exposure" data-control aria-label="Exposure up">▲</button>
-                <button class="stepper-btn" data-stepper-down="exposure" data-control aria-label="Exposure down">▼</button>
-              </div>
-              <span class="stepper-label">µs</span>
-            </div>
-          </div>
-
           <div class="video-row video-tally-row">
             <span class="video-row-label">Tally brightness</span>
             <div class="audio-faders">
@@ -648,7 +825,93 @@ export function renderPanelTemplate(isSupported: boolean): string {
           </div>
         </div>
       </section>
+    </section>
+  `;
+}
 
+function renderColorView(): string {
+  const channelLabel = (channel: PaintChannel): string =>
+    channel === "luma" ? "Y" : channel.charAt(0).toUpperCase();
+  const channelClass = (channel: PaintChannel): string => (channel === "luma" ? "luma" : channel);
+
+  const paintKnobs = PAINT_GROUPS.flatMap((group) =>
+    PAINT_CHANNELS.map(
+      (channel) => {
+        const r = COLOR_GROUP_RANGES[group];
+        return `
+        <div class="knob-cell paint-knob-cell" data-paint-cell data-group="${group}" data-channel="${channel}" data-control>
+          <div
+            class="bm-pot2__knob paint-bm-knob knob-channel--${channelClass(channel)}"
+            role="slider"
+            tabindex="0"
+            aria-label="${group} ${channelLabel(channel)}"
+            aria-valuemin="${r.min}"
+            aria-valuemax="${r.max}"
+            aria-valuenow="${r.default}"
+            data-knob
+            data-control
+            style="--angle: 0deg;"
+          >
+            <span class="bm-pot2__rim" aria-hidden="true"></span>
+            <span class="bm-pot2__face" aria-hidden="true"></span>
+            <span class="bm-pot2__indicator" aria-hidden="true"></span>
+          </div>
+          <div class="knob-meta">
+            <span class="knob-label">${group} ${channelLabel(channel)}</span>
+            <span class="bm-seg2 app-bm-seg-readout paint-value-seg bm-seg--green" data-paint-value data-seg-display>
+              <span class="bm-seg2__display" data-seg-slots></span>
+            </span>
+          </div>
+        </div>
+      `;
+      },
+    ),
+  ).join("");
+
+  return `
+    <section class="view view--color" data-view="color" id="view-color" role="tabpanel" aria-labelledby="tab-color" hidden>
+      <div class="chassis chassis--single">
+        <div class="chassis-row camera-row">
+          <div class="paint-area">
+            <div class="paint-knobs">${paintKnobs}</div>
+            <div class="paint-actions">
+              <span class="paint-actions-hint">Drag knobs to adjust. Y = luma (master).</span>
+              <div class="paint-actions-buttons">
+                <button class="bm-btn adv-btn" type="button" data-color-adv data-control aria-pressed="false" aria-controls="color-card">
+                  ADV
+                </button>
+                <button class="bm-btn" type="button" data-color-reset data-control>Color Reset</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <section class="card color-card" data-color-card id="color-card" hidden>
+        <div class="card-header">
+          <h2>Color Correction — Advanced</h2>
+          <button class="bm-btn" type="button" data-color-reset-card data-control>Reset</button>
+        </div>
+        <div class="card-body color-body">
+          ${renderColorGroup("lift", "Lift", -2, 2, 0)}
+          ${renderColorGroup("gamma", "Gamma", -4, 4, 0)}
+          ${renderColorGroup("gain", "Gain", 0, 16, 1)}
+          <div class="color-extras">
+            ${renderColorHFader("contrast-pivot", "Contrast pivot", 0, 1, 0.5, "contrastPivot")}
+            ${renderColorHFader("contrast-adjust", "Contrast adjust", 0, 2, 1, "contrastAdjust")}
+            ${renderColorHFader("luma-mix", "Luma mix", 0, 1, 1, "lumaMix")}
+            ${renderColorHFader("hue", "Hue", -1, 1, 0, "hue")}
+            ${renderColorHFader("saturation", "Saturation", 0, 2, 1, "saturation")}
+          </div>
+        </div>
+      </section>
+    </section>
+  `;
+}
+
+function renderDebugView(): string {
+  return `
+    <section class="view view--debug" data-view="debug" id="view-debug" role="tabpanel" aria-labelledby="tab-debug" hidden>
       <section class="card status-card">
         <h2>Camera Status</h2>
         <ul class="status-flags" data-status>
@@ -659,16 +922,189 @@ export function renderPanelTemplate(isSupported: boolean): string {
       <section class="card">
         <div class="log-header">
           <h2>Debug Log</h2>
-          <button data-clear-log>Clear</button>
+          <button class="bm-btn" type="button" data-clear-log>Clear</button>
         </div>
         <ul class="debug-log" data-log></ul>
       </section>
-      ${!isSupported && isIosLikeWebBluetoothBlocked() ? renderBluefyOfferModal() : ""}
+    </section>
+  `;
+}
+
+function renderSceneBar(): string {
+  return `
+    <div class="scene-bar" data-scene-bar hidden>
+      <div class="chassis-row scene-file-row">
+        <span class="scene-file-label">SCENE FILE</span>
+        <div class="scene-file-banks" data-scene-banks>
+          ${Array.from({ length: 5 }, (_, index) => {
+            const slot = index;
+            return `
+              <button
+                class="scene-bank"
+                data-scene-bank
+                data-bank-slot="${slot}"
+                data-control
+                aria-label="Scene file ${slot + 1}"
+                aria-pressed="false"
+              >
+                <span class="scene-bank-label">${slot + 1}</span>
+                <span class="scene-bank-led"></span>
+              </button>
+            `;
+          }).join("")}
+        </div>
+        <button class="bm-btn scene-store" type="button" data-scene-store data-control aria-pressed="false">
+          STORE
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function renderRelayModals(): string {
+  return `
+    <div class="relay-modal-backdrop" data-relay-host-modal hidden>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="relay-host-title"
+        class="relay-modal"
+      >
+        <h2 id="relay-host-title" class="relay-modal-title">Relay session name</h2>
+        <p class="relay-modal-body">Guests will see this name in Join. Stored per camera device.</p>
+        <label class="relay-modal-field">
+          <span class="relay-modal-label">Session name</span>
+          <input type="text" data-relay-host-name maxlength="120" autocomplete="off" />
+        </label>
+        <label class="relay-modal-check">
+          <input type="checkbox" data-relay-host-share checked />
+          Share session (start relay immediately)
+        </label>
+        <div class="relay-modal-actions">
+          <button type="button" class="bm-btn connect-primary" data-relay-host-confirm data-control>
+            Confirm
+          </button>
+          <button type="button" class="bm-btn" data-relay-host-cancel data-control>
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+    <div class="relay-modal-backdrop" data-relay-list-modal hidden>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="relay-list-title"
+        class="relay-modal relay-modal--wide"
+      >
+        <h2 id="relay-list-title" class="relay-modal-title">Join session</h2>
+        <p class="relay-modal-body muted">Open sessions on this server (same-origin list).</p>
+        <button type="button" class="bm-btn" data-relay-refresh-list data-control>Refresh list</button>
+        <div class="relay-session-list-wrap">
+          <ul class="relay-session-list" data-relay-session-list aria-live="polite"></ul>
+          <p class="relay-session-empty muted" data-relay-empty hidden>Loading hosted sessions…</p>
+        </div>
+        <div class="relay-modal-actions">
+          <button type="button" class="bm-btn" data-relay-list-close data-control>Close</button>
+        </div>
+      </div>
+    </div>
+    <div class="relay-modal-backdrop" data-relay-share-needs-connection hidden>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="relay-share-needs-ble-title"
+        class="relay-modal"
+      >
+        <h2 id="relay-share-needs-ble-title" class="relay-modal-title">Connection needed</h2>
+        <p class="relay-modal-body">
+          To share a session for remote operators, connect this device to the camera over Bluetooth first, then tap Share again.
+        </p>
+        <div class="relay-modal-actions">
+          <button type="button" class="bm-btn connect-primary" data-relay-share-needs-ble-ok data-control>
+            OK
+          </button>
+        </div>
+      </div>
+    </div>
+    <div class="relay-modal-backdrop" data-record-stop-confirm-modal hidden>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="record-stop-confirm-title"
+        class="relay-modal"
+      >
+        <h2 id="record-stop-confirm-title" class="relay-modal-title">Stop recording?</h2>
+        <p class="relay-modal-body">Stop recording on the camera?</p>
+        <div class="relay-modal-actions">
+          <button type="button" class="bm-btn" data-record-stop-cancel data-control>
+            Cancel
+          </button>
+          <button type="button" class="bm-btn connect-primary" data-record-stop-confirm data-control>
+            Stop recording
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+/** @param bleAvailable - `navigator.bluetooth` usable for pairing (Join over WebSocket may still work when false). */
+export function renderPanelTemplate(bleAvailable: boolean): string {
+  return `
+    <main class="panel-app panel-app--views" data-view-active="connect">
+      ${renderAppHeader(bleAvailable)}
+      <div class="views" data-views>
+        ${renderConnectView(bleAvailable)}
+        ${renderSettingsView()}
+        ${renderIrisView()}
+        ${renderAudioView()}
+        ${renderVideoView()}
+        ${renderColorView()}
+        ${renderDebugView()}
+      </div>
+      ${renderSceneBar()}
+      ${renderViewNav()}
+      ${!bleAvailable && isIosLikeWebBluetoothBlocked() ? renderBluefyOfferModal() : ""}
+      ${!bleAvailable && !isIosLikeWebBluetoothBlocked() ? renderGenericWebBleHelpModal() : ""}
+      ${renderRelayModals()}
     </main>
   `;
 }
 
-export function updatePanel(root: HTMLElement, snapshot: CameraSnapshot): void {
+/** Switch the active view. Updates DOM visibility, ARIA, nav state, and scene bar. */
+export function setActiveView(root: HTMLElement, viewId: ViewId): void {
+  const main = root.querySelector<HTMLElement>(".panel-app");
+  if (!main) return;
+  main.dataset.viewActive = viewId;
+
+  root.querySelectorAll<HTMLElement>("[data-view]").forEach((section) => {
+    const matches = section.dataset.view === viewId;
+    section.hidden = !matches;
+  });
+
+  root.querySelectorAll<HTMLButtonElement>("[data-view-switch]").forEach((tab) => {
+    const matches = tab.dataset.viewSwitch === viewId;
+    tab.classList.toggle("is-active", matches);
+    tab.setAttribute("aria-selected", matches ? "true" : "false");
+    tab.tabIndex = matches ? 0 : -1;
+  });
+
+  const sceneBar = root.querySelector<HTMLElement>("[data-scene-bar]");
+  if (sceneBar) {
+    sceneBar.hidden = !SCENE_BAR_VIEWS.has(viewId);
+  }
+}
+
+export function isViewId(value: string | null | undefined): value is ViewId {
+  return value !== null && value !== undefined && (VIEW_IDS as readonly string[]).includes(value);
+}
+
+export function updatePanel(
+  root: HTMLElement,
+  snapshot: CameraSnapshot,
+  transport?: { localBleGattConnected?: boolean },
+): void {
   setReadout(root, "gain", formatGain(snapshot.gainDb));
   setReadout(root, "shutter", formatShutter(snapshot));
   setReadout(root, "autoexp", formatAutoExp(snapshot.autoExposureMode));
@@ -691,10 +1127,12 @@ export function updatePanel(root: HTMLElement, snapshot: CameraSnapshot): void {
   updatePaintKnobs(root, snapshot);
   updateColorCard(root, snapshot);
   updateCameraPillar(root, snapshot.cameraNumber);
+  updateCameraBadge(root, snapshot.cameraNumber);
   updateIrisWheel(root, snapshot);
   updateIrisJoystick(root, snapshot);
   updateFocusFader(root, snapshot);
-  updateLeds(root, snapshot);
+  updateUnitOutputs(root, snapshot);
+  updateLeds(root, snapshot, transport);
   updateRecording(root, snapshot.recording);
 }
 
@@ -754,16 +1192,24 @@ function updateCameraPillar(root: HTMLElement, cameraNumber: number | undefined)
   });
 }
 
+function updateCameraBadge(root: HTMLElement, cameraNumber: number | undefined): void {
+  const digit = root.querySelector<HTMLElement>("[data-cam-badge-digit]");
+  if (!digit) return;
+  digit.textContent = cameraNumber !== undefined ? String(cameraNumber) : "—";
+}
+
 export const MASTER_GAIN_RANGE = { min: -12, max: 30 };
 export const MASTER_BLACK_RANGE = { min: -2, max: 2 };
 
 function updateIrisWheel(root: HTMLElement, snapshot: CameraSnapshot): void {
-  const marker = root.querySelector<HTMLElement>("[data-iris-wheel-marker]");
-  if (!marker) return;
+  const knob = root.querySelector<HTMLElement>("[data-iris-wheel]");
+  if (!knob) return;
 
-  const norm = masterBlackToNormalised(snapshot.color.lift.luma ?? 0);
+  const luma = snapshot.color.lift.luma ?? 0;
+  const norm = masterBlackToNormalised(luma);
   const angle = norm * 270 - 135;
-  marker.style.transform = `rotate(${angle}deg)`;
+  knob.style.setProperty("--angle", `${angle}deg`);
+  knob.setAttribute("aria-valuenow", String(luma));
 }
 
 export function gainDbToNormalised(db: number): number {
@@ -806,14 +1252,27 @@ function updateIrisJoystick(root: HTMLElement, snapshot: CameraSnapshot): void {
   positionIrisHandle(joystick, handle, iris);
 }
 
-export function positionIrisHandle(joystick: HTMLElement, handle: HTMLElement, irisNormalised: number): void {
-  const rect = joystick.getBoundingClientRect();
-  if (rect.height === 0 || rect.width === 0) return;
+const IRIS_TBAR_SHAFT_PADDING_PX = 24;
 
-  const verticalRange = rect.height - handle.offsetHeight;
+/** Usable iris travel inside the bm-tbar shaft (matches patterns attachTBar: shaft height − 12px top/bottom inset). */
+export function irisTbarDragRangePx(joystick: HTMLElement, handle: HTMLElement): number {
+  const shaft = joystick.querySelector<HTMLElement>(".bm-tbar__shaft");
+  if (shaft && shaft.clientHeight > 0) {
+    return Math.max(1, shaft.clientHeight - IRIS_TBAR_SHAFT_PADDING_PX);
+  }
+  return Math.max(1, joystick.clientHeight - 1.2 * 16 - handle.offsetHeight);
+}
+
+/** Position T-bar iris handle; syncs `--travel` so bm-tbar thumb math stays aligned with drag range. */
+export function positionIrisHandle(joystick: HTMLElement, handle: HTMLElement, irisNormalised: number): void {
+  if (joystick.clientHeight === 0) return;
   const iris = Math.max(0, Math.min(1, irisNormalised));
-  const y = (1 - iris) * verticalRange;
-  handle.style.transform = `translate(-50%, ${y}px)`;
+
+  joystick.style.setProperty("--travel", `${irisTbarDragRangePx(joystick, handle)}px`);
+
+  handle.style.setProperty("--pos", String(iris));
+  joystick.querySelector<HTMLElement>(".bm-tbar__ladder")?.style.setProperty("--fill", String(iris));
+  handle.setAttribute("aria-valuenow", String(Math.round(iris * 100)));
 }
 
 function updateColorCard(root: HTMLElement, snapshot: CameraSnapshot): void {
@@ -835,7 +1294,7 @@ function updateColorCard(root: HTMLElement, snapshot: CameraSnapshot): void {
       const value = snapshot.color[group][channel];
       positionVerticalFader(fader, handle, value);
       fader.setAttribute("aria-valuenow", value.toFixed(2));
-      readout.textContent = value.toFixed(2);
+      writePaintSegReadout(readout, value);
     });
   });
 
@@ -896,12 +1355,9 @@ export function centeredNormToValue(norm: number, range: FaderRange): number {
 }
 
 export function positionVerticalFader(fader: HTMLElement, handle: HTMLElement, value: number): void {
-  const height = fader.clientHeight;
-  if (height === 0) return;
   const norm = valueToCenteredNorm(value, readFaderRange(fader));
-  const verticalRange = Math.max(0, height - handle.offsetHeight - FADER_PADDING_PX * 2);
-  const y = FADER_PADDING_PX + (1 - norm) * verticalRange;
-  handle.style.transform = `translate(-50%, ${y}px)`;
+  handle.style.setProperty("--pos", String(norm));
+  fader.querySelector<HTMLElement>("[data-vfader-fill]")?.style.setProperty("--pos", String(norm));
 }
 
 export function positionHorizontalFader(fader: HTMLElement, handle: HTMLElement, value: number): void {
@@ -940,24 +1396,41 @@ function updatePaintKnobs(root: HTMLElement, snapshot: CameraSnapshot): void {
     }
 
     const value = snapshot.color[group][channel];
-    const indicator = cell.querySelector<HTMLElement>("[data-knob-indicator]");
+    const knob = cell.querySelector<HTMLElement>("[data-knob]");
     const readout = cell.querySelector<HTMLElement>("[data-paint-value]");
 
-    if (indicator) {
-      indicator.style.transform = `rotate(${paintValueToAngle(group, value)}deg)`;
+    if (knob) {
+      knob.style.setProperty("--angle", `${paintValueToAngle(group, value)}deg`);
+      knob.setAttribute("aria-valuenow", value.toFixed(2));
     }
 
     if (readout) {
-      readout.textContent = value.toFixed(2);
+      writePaintSegReadout(readout, value);
     }
   });
 }
 
-function updateLeds(root: HTMLElement, snapshot: CameraSnapshot): void {
+export function writePaintSegReadout(readout: HTMLElement, value: number): void {
+  const slots = readout.querySelector<HTMLElement>("[data-seg-slots]");
+  const text = value.toFixed(2);
+  if (slots) {
+    populateSegSlots(slots, text);
+    readout.setAttribute("aria-label", text);
+    return;
+  }
+  readout.textContent = text;
+}
+
+function updateLeds(
+  root: HTMLElement,
+  snapshot: CameraSnapshot,
+  transport?: { localBleGattConnected?: boolean },
+): void {
   const status = snapshot.status;
+  const pairOn = (status?.paired ?? false) || transport?.localBleGattConnected === true;
   toggleLed(root, "power", status?.powerOn ?? false);
   toggleLed(root, "connected", status?.connected ?? false);
-  toggleLed(root, "paired", status?.paired ?? false);
+  toggleLed(root, "paired", pairOn);
   toggleLed(root, "ready", status?.cameraReady ?? false);
   toggleLed(root, "recording", snapshot.recording);
 
@@ -968,21 +1441,32 @@ function updateLeds(root: HTMLElement, snapshot: CameraSnapshot): void {
 }
 
 function updateRecording(root: HTMLElement, recording: boolean): void {
-  root.querySelector<HTMLElement>("[data-record-start]")?.classList.toggle("active", recording);
+  const btn = root.querySelector<HTMLButtonElement>("[data-record-start]");
+  if (!btn) return;
+  btn.classList.toggle("active", recording);
+  btn.setAttribute("aria-pressed", recording ? "true" : "false");
+  btn.setAttribute(
+    "aria-label",
+    recording ? "Recording — tap to stop after confirming" : "Start recording",
+  );
 }
 
 function toggleLed(root: HTMLElement, name: string, on: boolean): void {
-  const led = root.querySelector<HTMLElement>(`[data-led="${name}"]`);
-  if (led) {
+  root.querySelectorAll<HTMLElement>(`[data-led="${name}"]`).forEach((led) => {
     led.classList.toggle("on", on);
-  }
+  });
 }
 
 function setReadout(root: HTMLElement, name: string, value: string): void {
-  const element = root.querySelector<HTMLElement>(`[data-readout="${name}"]`);
-  if (element) {
+  root.querySelectorAll<HTMLElement>(`[data-readout="${name}"]`).forEach((element) => {
+    const slots = element.querySelector<HTMLElement>("[data-seg-slots]");
+    if (slots) {
+      populateSegSlots(slots, value);
+      element.setAttribute("aria-label", value);
+      return;
+    }
     element.textContent = value;
-  }
+  });
 }
 
 function formatGain(gainDb: number | undefined): string {
@@ -1103,12 +1587,9 @@ function setMiniFaderMirror(root: HTMLElement, faderAttr: string, readout: strin
 }
 
 export function positionMiniFaderHandle(fader: HTMLElement, handle: HTMLElement, value: number): void {
-  const rect = fader.getBoundingClientRect();
-  if (rect.height === 0) return;
-  const verticalRange = rect.height - handle.offsetHeight;
   const v = Math.max(0, Math.min(1, value));
-  const y = (1 - v) * verticalRange;
-  handle.style.top = `${y}px`;
+  handle.style.setProperty("--pos", String(v));
+  fader.querySelector<HTMLElement>("[data-mini-fader-fill]")?.style.setProperty("--pos", String(v));
 }
 
 export function positionHFaderHandle(fader: HTMLElement, handle: HTMLElement, value: number): void {
@@ -1140,6 +1621,25 @@ function updateAudioCard(root: HTMLElement, snapshot: CameraSnapshot): void {
 }
 
 
+function updateUnitOutputs(root: HTMLElement, snapshot: CameraSnapshot): void {
+  const bars = root.querySelector<HTMLButtonElement>("[data-color-bars]");
+  if (bars) {
+    const on = snapshot.unitOutputs?.colorBars === true;
+    bars.classList.toggle("active", on);
+    bars.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+  const pgmRet = root.querySelector<HTMLButtonElement>("[data-program-return-feed]");
+  if (pgmRet) {
+    const on = snapshot.unitOutputs?.programReturnFeed === true;
+    pgmRet.classList.toggle("active", on);
+    pgmRet.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+  root.querySelector<HTMLElement>("[data-bars-led]")?.classList.toggle("on", snapshot.unitOutputs?.colorBars === true);
+  root
+    .querySelector<HTMLElement>("[data-program-return-led]")
+    ?.classList.toggle("on", snapshot.unitOutputs?.programReturnFeed === true);
+}
+
 function updateVideoCard(root: HTMLElement, snapshot: CameraSnapshot): void {
   setSegmentedValue(root, "[data-video-dynamic-range]", snapshot.dynamicRange);
   setSegmentedValue(root, "[data-video-sharpening]", snapshot.sharpeningLevel);
@@ -1152,8 +1652,6 @@ function updateVideoCard(root: HTMLElement, snapshot: CameraSnapshot): void {
   if (lutEnabled && snapshot.displayLut?.enabled !== undefined && document.activeElement !== lutEnabled) {
     lutEnabled.checked = snapshot.displayLut.enabled;
   }
-
-  setReadout(root, "exposureUs", snapshot.exposureUs !== undefined ? String(snapshot.exposureUs) : "----");
 
   setMiniFaderMirror(root, "tally-master", "tallyMaster", snapshot.tally?.brightness?.master);
   setMiniFaderMirror(root, "tally-front", "tallyFront", snapshot.tally?.brightness?.front);
