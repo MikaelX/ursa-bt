@@ -105,6 +105,27 @@ describe("CameraState", () => {
     expect(state.current.ndFilterStops).toBeCloseTo(1.8, 1);
   });
 
+  it("ingests display color bars and program return (category 4)", () => {
+    const state = new CameraState();
+    state.ingestIncomingPacket(commands.colorBars(30));
+    expect(state.current.unitOutputs?.colorBars).toBe(true);
+    state.ingestIncomingPacket(commands.colorBars(0));
+    expect(state.current.unitOutputs?.colorBars).toBe(false);
+
+    state.ingestIncomingPacket(commands.programReturnFeed(15));
+    expect(state.current.unitOutputs?.programReturnFeed).toBe(true);
+    state.ingestIncomingPacket(commands.programReturnFeed(0));
+    expect(state.current.unitOutputs?.programReturnFeed).toBe(false);
+  });
+
+  it("relayPanelSyncPatch merges unitOutputs without resetting unrelated fields", () => {
+    const state = new CameraState();
+    state.ingestIncomingPacket(commands.gain(6));
+    state.relayPanelSyncPatch({ unitOutputs: { colorBars: true, programReturnFeed: false } });
+    expect(state.current.gainDb).toBe(6);
+    expect(state.current.unitOutputs?.colorBars).toBe(true);
+  });
+
   it("ingests new Video params (dynamic range, sharpening, display LUT, exposure us)", () => {
     const state = new CameraState();
     state.ingestIncomingPacket(commands.dynamicRange(2));
@@ -143,5 +164,29 @@ describe("CameraState", () => {
     state.setCameraNumber(3);
     expect(state.current.cameraNumber).toBe(3);
     expect(listener).toHaveBeenLastCalledWith(expect.objectContaining({ cameraNumber: 3 }));
+  });
+
+  it("hydrates relay bootstrap snapshot (nested colour + tally)", () => {
+    const state = new CameraState();
+    state.hydrateFromRelayExport({
+      recording: true,
+      gainDb: 12,
+      cameraNumber: 4,
+      color: {
+        lift: { red: 0.1, green: 0, blue: 0, luma: 0 },
+      },
+      tally: {
+        programMe: true,
+        brightness: { master: 0.8 },
+      },
+    });
+
+    expect(state.current.recording).toBe(true);
+    expect(state.current.gainDb).toBe(12);
+    expect(state.current.cameraNumber).toBe(4);
+    expect(state.current.color.lift.red).toBeCloseTo(0.1, 2);
+    expect(state.current.tally?.programMe).toBe(true);
+    expect(state.current.tally?.brightness?.master).toBeCloseTo(0.8, 2);
+    expect(state.current.updatedKeys).toContain("relay-bootstrap");
   });
 });

@@ -1,6 +1,13 @@
 import { decodeConfigurationPacket, type DecodedConfigurationPacket } from "./protocol";
 import type { CameraStatus } from "./status";
 
+function isRelayPanelSyncDecoded(packet: DecodedConfigurationPacket): boolean {
+  return (
+    (packet.category === 4 && (packet.parameter === 4 || packet.parameter === 6)) ||
+    (packet.category === 1 && packet.parameter === 15)
+  );
+}
+
 export interface LiftGainGamma {
   red: number;
   green: number;
@@ -59,6 +66,8 @@ export interface CameraSnapshot {
   dynamicRange?: number;
   sharpeningLevel?: number;
   displayLut?: { selected: number; enabled: boolean };
+  /** Display outputs toggled locally or via relay; not always echoed on BLE incoming. */
+  unitOutputs?: { colorBars: boolean; programReturnFeed: boolean };
   exposureUs?: number;
   tally?: {
     programMe: boolean;
@@ -82,6 +91,12 @@ export interface CameraSnapshot {
 
 export type SnapshotListener = (snapshot: CameraSnapshot) => void;
 
+export interface IngestIncomingResult {
+  decoded: DecodedConfigurationPacket | undefined;
+  /** Keys updated on the live snapshot; empty if the packet was not mapped to UI/state. */
+  changedKeys: string[];
+}
+
 const EMPTY_LGG = (): LiftGainGamma => ({ red: 0, green: 0, blue: 0, luma: 0 });
 
 function createEmptySnapshot(): CameraSnapshot {
@@ -96,6 +111,7 @@ function createEmptySnapshot(): CameraSnapshot {
     },
     audio: {},
     metadata: {},
+    unitOutputs: { colorBars: false, programReturnFeed: false },
     updatedKeys: [],
   };
 }
@@ -121,6 +137,20 @@ export class CameraState {
     this.emit(["reset"]);
   }
 
+  /** Apply a serialized snapshot pushed by the BLE host after joining the relay session. */
+  hydrateFromRelayExport(imported: unknown): void {
+    if (!imported || typeof imported !== "object") return;
+    let raw: Partial<CameraSnapshot>;
+    try {
+      raw = JSON.parse(JSON.stringify(imported)) as Partial<CameraSnapshot>;
+    } catch {
+      return;
+    }
+    const merged = relayMergeImportedSnapshot(createEmptySnapshot(), raw);
+    this.snapshot = merged;
+    this.listeners.forEach((listener) => listener(this.snapshot));
+  }
+
   setDeviceName(name: string): void {
     this.update(["deviceName"], (draft) => {
       draft.deviceName = name;
@@ -133,12 +163,12 @@ export class CameraState {
     });
   }
 
-  ingestIncomingPacket(data: DataView | Uint8Array): DecodedConfigurationPacket | undefined {
+  ingestIncomingPacket(data: DataView | Uint8Array): IngestIncomingResult {
     const bytes = data instanceof Uint8Array ? data : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
     const decoded = decodeConfigurationPacket(bytes);
 
     if (!decoded) {
-      return undefined;
+      return { decoded: undefined, changedKeys: [] };
     }
 
     const changedKeys = applyDecoded(this.snapshot, decoded);
@@ -147,7 +177,7 @@ export class CameraState {
       this.emit(changedKeys);
     }
 
-    return decoded;
+    return { decoded, changedKeys };
   }
 
   setRecording(recording: boolean): void {
@@ -228,6 +258,51 @@ export class CameraState {
     });
   }
 
+  /** Mirror display LUT UI when the camera does not echo the write. */
+  applyDisplayLutWrite(patch: Partial<NonNullable<CameraSnapshot["displayLut"]>>): void {
+    const keys = Object.keys(patch).map((k) => `displayLut.${k}`);
+    this.update(keys, (draft) => {
+      draft.displayLut = { ...(draft.displayLut ?? { selected: 0, enabled: false }), ...patch };
+    });
+  }
+
+  applyUnitOutputsWrite(patch: Partial<NonNullable<CameraSnapshot["unitOutputs"]>>): void {
+    const keys = Object.keys(patch).map((k) => `unitOutputs.${k}`);
+    this.update(keys, (draft) => {
+      const cur = draft.unitOutputs ?? { colorBars: false, programReturnFeed: false };
+      draft.unitOutputs = { ...cur, ...patch };
+    });
+  }
+
+  /**
+   * Apply command bytes that affect panel-only state (bars, PGM return, display LUT)
+   * so the host can mirror joiner writes before broadcasting.
+   */
+  applyRelayPanelSyncFromCommandBytes(bytes: Uint8Array): boolean {
+    const decoded = decodeConfigurationPacket(bytes);
+    if (!decoded || !isRelayPanelSyncDecoded(decoded)) return false;
+    const keys = applyDecoded(this.snapshot, decoded);
+    if (keys.length === 0) return false;
+    this.emit(keys);
+    return true;
+  }
+
+  /** Merge a partial snapshot from the host (bars / LUT, etc.). */
+  relayPanelSyncPatch(partial: Record<string, unknown>): void {
+    if (!partial || typeof partial !== "object") return;
+    let raw: Partial<CameraSnapshot>;
+    try {
+      raw = JSON.parse(JSON.stringify(partial)) as Partial<CameraSnapshot>;
+    } catch {
+      return;
+    }
+    const merged = relayMergeImportedSnapshot(this.snapshot, raw);
+    merged.updatedKeys = ["relay-panel-sync"];
+    merged.lastUpdateMs = Date.now();
+    this.snapshot = merged;
+    this.listeners.forEach((listener) => listener(this.snapshot));
+  }
+
   private update(keys: string[], mutate: (draft: CameraSnapshot) => void): void {
     const next = { ...this.snapshot, updatedKeys: keys, lastUpdateMs: Date.now() };
     next.lens = { ...this.snapshot.lens };
@@ -248,6 +323,12 @@ export class CameraState {
   private emit(keys: string[]): void {
     this.update(keys, () => undefined);
   }
+}
+
+/** True when a successful BLE write of this packet should trigger relay `panel_sync` from the host. */
+export function shouldRelayPanelSyncCommand(packet: Uint8Array): boolean {
+  const decoded = decodeConfigurationPacket(packet);
+  return decoded !== undefined && isRelayPanelSyncDecoded(decoded);
 }
 
 function applyDecoded(
@@ -375,6 +456,22 @@ function applyDecoded(
           break;
       }
       break;
+    case 4: // Display (bars / program return — may not echo on incoming)
+      switch (packet.parameter) {
+        case 4: {
+          const uo = snapshot.unitOutputs ?? { colorBars: false, programReturnFeed: false };
+          snapshot.unitOutputs = { ...uo, colorBars: v0 !== 0 };
+          mark("unitOutputs.colorBars");
+          break;
+        }
+        case 6: {
+          const uo = snapshot.unitOutputs ?? { colorBars: false, programReturnFeed: false };
+          snapshot.unitOutputs = { ...uo, programReturnFeed: v0 !== 0 };
+          mark("unitOutputs.programReturnFeed");
+          break;
+        }
+      }
+      break;
     case 8: // Color correction
       switch (packet.parameter) {
         case 0:
@@ -468,6 +565,78 @@ function applyDecoded(
 
   void v4;
   return changed;
+}
+
+/** Deep-merge relay JSON into defaults so joining clients inherit the master's live panel snapshot. */
+function relayMergeImportedSnapshot(base: CameraSnapshot, p: Partial<CameraSnapshot>): CameraSnapshot {
+  const metadata = {
+    ...base.metadata,
+    ...p.metadata,
+    sceneTags:
+      Array.isArray(p.metadata?.sceneTags)
+        ? [...p.metadata.sceneTags]
+        : base.metadata.sceneTags
+          ? [...base.metadata.sceneTags]
+          : undefined,
+  };
+
+  const next: CameraSnapshot = {
+    ...base,
+    ...p,
+    status: p.status !== undefined ? p.status : base.status,
+    recording: typeof p.recording === "boolean" ? p.recording : base.recording,
+    lens: { ...base.lens, ...p.lens },
+    audio: { ...base.audio, ...p.audio },
+    metadata,
+    color: {
+      ...base.color,
+      ...p.color,
+      lift: { ...base.color.lift, ...p.color?.lift },
+      gamma: { ...base.color.gamma, ...p.color?.gamma },
+      gain: { ...base.color.gain, ...p.color?.gain },
+      offset: { ...base.color.offset, ...p.color?.offset },
+      contrast:
+        p.color?.contrast !== undefined
+          ? { ...(base.color.contrast ?? { pivot: 0.5, adjust: 1 }), ...p.color.contrast }
+          : base.color.contrast,
+    },
+    tally: p.tally
+      ? {
+          ...(base.tally ?? { programMe: false, previewMe: false }),
+          ...p.tally,
+          brightness: {
+            ...(base.tally?.brightness ?? {}),
+            ...(p.tally.brightness ?? {}),
+          },
+        }
+      : base.tally,
+    codec:
+      p.codec !== undefined ? { ...(base.codec ?? { basic: 0, variant: 0 }), ...p.codec } : base.codec,
+    recordingFormat:
+      p.recordingFormat !== undefined
+        ? { ...(base.recordingFormat ?? {}), ...p.recordingFormat }
+        : base.recordingFormat,
+    displayLut:
+      p.displayLut !== undefined
+        ? { ...(base.displayLut ?? { selected: 0, enabled: false }), ...p.displayLut }
+        : base.displayLut,
+    unitOutputs:
+      p.unitOutputs !== undefined
+        ? {
+            ...(base.unitOutputs ?? { colorBars: false, programReturnFeed: false }),
+            ...p.unitOutputs,
+          }
+        : base.unitOutputs,
+    whiteBalance:
+      p.whiteBalance !== undefined
+        ? { ...(base.whiteBalance ?? { temperature: 0, tint: 0 }), ...p.whiteBalance }
+        : base.whiteBalance,
+  };
+
+  next.updatedKeys = ["relay-bootstrap"];
+  next.lastUpdateMs = Date.now();
+
+  return next;
 }
 
 /**

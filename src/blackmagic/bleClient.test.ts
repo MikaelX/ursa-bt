@@ -166,6 +166,8 @@ describe("BlackmagicBleClient", () => {
       expect.objectContaining({
         paired: true,
         cameraReady: true,
+        payloadHex: "24",
+        statusByteReservedBits: 0,
       }),
     );
   });
