@@ -1390,19 +1390,24 @@ button.bluefy-modal-dismiss {
   min-width: 0;
 }
 
-.color-group {
+/* Recessed chassis: color lift/gamma/gain + audio/video mini-fader grids (same `.audio-faders` in both views). */
+.color-group,
+.audio-faders {
   background:
     linear-gradient(180deg, rgba(0, 0, 0, 0.45) 0%, rgba(0, 0, 0, 0.20) 28%, rgba(0, 0, 0, 0.20) 72%, rgba(0, 0, 0, 0.40) 100%),
     rgba(8, 9, 11, 0.85);
   border: 1px solid rgba(0, 0, 0, 0.6);
   border-radius: 0.7rem;
-  padding: 0.6rem 0.8rem 0.7rem;
   box-shadow:
     inset 0 2px 4px rgba(0, 0, 0, 0.7),
     inset 0 -1px 0 rgba(255, 255, 255, 0.04),
     inset 1px 0 0 rgba(0, 0, 0, 0.4),
     inset -1px 0 0 rgba(0, 0, 0, 0.4),
     0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.color-group {
+  padding: 0.6rem 0.8rem 0.7rem;
 }
 
 .color-group-vertical {
@@ -1576,9 +1581,7 @@ button.bluefy-modal-dismiss {
   column-gap: 0.35rem;
   row-gap: 0.5rem;
   width: 100%;
-  padding: 0.65rem 0.3rem;
-  background: rgba(0, 0, 0, 0.3);
-  border-radius: 6px;
+  padding: 0.65rem 0.5rem 0.75rem;
 }
 
 .audio-group-label {
