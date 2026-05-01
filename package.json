@@ -14,11 +14,14 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "tsx": "^4.20.6"
+    "ioredis": "^5.10.1",
+    "tsx": "^4.20.6",
+    "ws": "^8.20.0"
   },
   "devDependencies": {
     "@fontsource/dseg7-classic": "^5.2.5",
     "@types/node": "^25.6.0",
+    "@types/ws": "^8.18.1",
     "jsdom": "^29.1.1",
     "npm-run-all": "^4.1.5",
     "typescript": "^6.0.3",

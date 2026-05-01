@@ -5,16 +5,13 @@ version: "3.8"
 services:
   redis:
     image: redis:7.2.1-alpine
-    ports:
-      - "6379:6379"
     command: redis-server --appendonly yes --appendfsync everysec --save 20 1
     volumes:
       - redis:/data
     networks:
       - isolated
-      - nginx-network
     deploy:
-      replicas: 2
+      replicas: 1
 
   bluetooth:
     image: mikaelx/bm-bluetooth:latest
@@ -22,13 +19,12 @@ services:
       DOCKER: "true"
       ENVIRONMENT: "production"
       PORT: 4000
+      REDIS_URL: redis://redis:6379
     networks:
       - isolated
       - nginx-network
     deploy:
       replicas: 2
-      restart_policy:
-        condition: always
 
 volumes:
   redis:

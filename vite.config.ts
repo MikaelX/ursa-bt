@@ -9,6 +9,7 @@ export default defineConfig({
         target:
           process.env.BANKS_SERVER_URL ?? `http://127.0.0.1:${BANKS_DEV_PORT}`,
         changeOrigin: true,
+        ws: true,
       },
     },
   },

@@ -9,6 +9,7 @@ import {
   type BanksFile,
 } from "../src/banks/bank.js";
 import { BANKS_DEV_PORT } from "../src/banks/devServerPort.js";
+import { RelayCoordinator } from "./relay/coordinator.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_FILE = process.env.DATA_FILE
@@ -143,7 +144,10 @@ const ROUTES = {
   bankSlot: /^\/api\/cameras\/([^/]+)\/banks\/(\d+)$/,
   loaded: /^\/api\/cameras\/([^/]+)\/loaded$/,
   state: /^\/api\/cameras\/([^/]+)\/state$/,
+  relaySessions: /^\/api\/relay\/sessions\/?$/,
 };
+
+const relayCoordinator = new RelayCoordinator(process.env.REDIS_URL);
 
 async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = req.url ?? "";
@@ -181,6 +185,17 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     await saveLastState(decodeURIComponent(match[1]!), state);
     send(res, 204, undefined);
     return;
+  }
+
+  if (url.match(ROUTES.relaySessions) && method === "GET") {
+    try {
+      const sessions = await relayCoordinator.listSessions();
+      send(res, 200, { sessions });
+      return;
+    } catch (error) {
+      send(res, 500, { error: (error as Error).message });
+      return;
+    }
   }
 
   if (STATIC_DIR && (method === "GET" || method === "HEAD")) {
@@ -240,8 +255,12 @@ const server = createServer((req, res) => {
   });
 });
 
+relayCoordinator.attachToHttpServer(server);
+
 server.listen(PORT, () => {
-  console.log(`bm-bluetooth banks server listening on http://localhost:${PORT}`);
+  console.log(`bm-bluetooth banks + relay listening on http://localhost:${PORT}`);
   console.log(`  data file: ${DATA_FILE}`);
   if (STATIC_DIR) console.log(`  static dir: ${STATIC_DIR}`);
+  console.log(`  relay ws: ws://localhost:${PORT}/api/relay/socket`);
+  console.log(`  redis: ${process.env.REDIS_URL ? "enabled" : "disabled (single-node fanout)"}`);
 });

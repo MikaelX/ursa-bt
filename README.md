@@ -25,7 +25,7 @@ The UI is modeled on the look and feel of a broadcast camera CCU panel: white-ba
 
 - Connect, pair, and reconnect to the camera over BLE; pair-PIN flow handled by the browser.
 - Live status flags, tally indicators, recording state, codec / format / FPS readout.
-- White balance + tint, gain, ISO, shutter angle, ND filter, exposure µs.
+- White balance + tint, gain, ISO, shutter angle, ND filter.
 - Iris joystick, master black knob, focus fader.
 - Lift / Gamma / Gain / Offset paint controls — both quick knobs and full RGB+Y vertical faders, plus contrast pivot/adjust, hue, saturation, luma mix.
 - 5 scene file banks per camera with **STORE** workflow; the active scene dims when the panel state has diverged from the stored bank.
