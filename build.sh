@@ -26,4 +26,4 @@ podman push "${IMAGE}:latest"
 
 echo "Done."
 # Webhook to auto-deploy (uncomment and set the URL when ready):
-# curl -X POST https://portainer.example.com/api/webhooks/REPLACE-ME
+curl -X POST https://portainer.almiro.se/api/webhooks/2fedf374-fa45-4418-beb5-cc4d5b987a0b

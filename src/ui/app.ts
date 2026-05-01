@@ -17,6 +17,7 @@ import {
   positionVerticalFader,
   readFaderRange,
   renderPanelTemplate,
+  initBluefyOfferModal,
   updatePanel,
   updateSceneBanks,
   valueToCenteredNorm,
@@ -209,12 +210,21 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
 
   root.innerHTML = renderPanelTemplate(client.isSupported);
   attachClient(root, client);
+  initBluefyOfferModal(root);
 
   let panelActive = true;
   let connected = false;
   const refreshControls = (): void => {
     setControlsEnabled(root, panelActive && connected);
     root.classList.toggle("panel-inactive", !panelActive);
+    const connWrap = root.querySelector(".connection-controls");
+    if (connWrap) {
+      connWrap.classList.toggle("is-ble-connected", client.isConnected);
+    }
+    const disconnectBtn = root.querySelector<HTMLButtonElement>("[data-disconnect]");
+    if (disconnectBtn) {
+      disconnectBtn.disabled = !client.isConnected;
+    }
     const btn = root.querySelector<HTMLButtonElement>("[data-panel-active]");
     if (btn) {
       btn.classList.toggle("active", panelActive);

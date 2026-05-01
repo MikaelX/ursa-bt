@@ -7,7 +7,7 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci
 
-COPY tsconfig.json vite.config.ts index.html ./
+COPY tsconfig.json vite.config.ts index.html patterns.html ./
 COPY src ./src
 COPY server ./server
 
@@ -22,15 +22,15 @@ ENV NODE_ENV=production \
     STATIC_DIR=/app/dist
 
 COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev \
- && npm install --no-save tsx@^4.20.6
+RUN npm ci --omit=dev
 
 COPY server ./server
 COPY src/banks ./src/banks
+COPY src/blackmagic ./src/blackmagic
 COPY --from=build /app/dist ./dist
 
 RUN mkdir -p /data
 VOLUME ["/data"]
 
 EXPOSE 4000
-CMD ["npx", "tsx", "server/index.ts"]
+CMD ["./node_modules/.bin/tsx", "server/index.ts"]

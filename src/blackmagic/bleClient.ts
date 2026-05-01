@@ -295,7 +295,7 @@ export class BlackmagicBleClient {
     this.log("Camera Status 0x01 written");
 
     return {
-      deviceId: this.device.id,
+      deviceId: deriveDeviceId(this.device),
       deviceName: this.device.name ?? "Unknown Blackmagic Camera",
       connected: this.isConnected,
     };
@@ -402,4 +402,22 @@ function getNavigatorBluetooth(): BluetoothLike | undefined {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Derive a stable storage key for a Bluetooth device.
+ *
+ * Web Bluetooth does not expose the actual BT MAC address (browsers anonymize
+ * it with an origin-scoped opaque `device.id`). Blackmagic cameras, however,
+ * advertise their MAC-suffix (e.g. "A:24C4E55C") as the BLE device name, which
+ * is the closest stable identifier we can persist against.
+ *
+ * Prefer the advertised name; fall back to `device.id` if no name is exposed.
+ */
+function deriveDeviceId(device: BluetoothDeviceLike): string {
+  const name = device.name?.trim();
+  if (name && name.length > 0) {
+    return name;
+  }
+  return device.id;
 }

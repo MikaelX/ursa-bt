@@ -143,6 +143,105 @@ function renderColorHFader(
   `;
 }
 
+/** App Store — Bluefy (Web Bluetooth browser for iOS). */
+export const BLUEFY_APP_STORE_URL = "https://apps.apple.com/app/bluefy-web-ble-browser/id1492822055";
+
+const BLUEFY_MODAL_DISMISS_KEY = "bm-bluefy-offer-dismissed";
+
+/** True when running on iPhone / iPad / iPod (including iPadOS desktop UA quirks). */
+export function isIosLikeWebBluetoothBlocked(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent;
+  if (/iPhone|iPad|iPod/i.test(ua)) return true;
+  if (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1) return true;
+  return false;
+}
+
+/** Show Bluefy install prompt once modal is in the DOM (iOS + no Web Bluetooth only). */
+export function initBluefyOfferModal(root: HTMLElement): void {
+  const backdrop = root.querySelector<HTMLElement>("[data-bluefy-modal-root]");
+  if (!backdrop) return;
+  if (typeof sessionStorage !== "undefined") {
+    try {
+      if (sessionStorage.getItem(BLUEFY_MODAL_DISMISS_KEY) === "1") return;
+    } catch {
+      /* ignore (e.g. private mode) */
+    }
+  }
+
+  const close = (): void => {
+    backdrop.hidden = true;
+    document.body.classList.remove("bluefy-modal-open");
+    if (typeof sessionStorage !== "undefined") {
+      try {
+        sessionStorage.setItem(BLUEFY_MODAL_DISMISS_KEY, "1");
+      } catch {
+        /* ignore */
+      }
+    }
+    document.removeEventListener("keydown", onKeyDown);
+  };
+
+  const onKeyDown = (e: KeyboardEvent): void => {
+    if (e.key === "Escape") close();
+  };
+
+  backdrop.hidden = false;
+  document.body.classList.add("bluefy-modal-open");
+
+  backdrop.querySelector("[data-bluefy-dismiss]")?.addEventListener("click", close);
+  backdrop.addEventListener("click", (e) => {
+    if (e.target === backdrop) close();
+  });
+  document.addEventListener("keydown", onKeyDown);
+}
+
+function renderBluefyOfferModal(): string {
+  return `
+    <div class="bluefy-modal-backdrop" data-bluefy-modal-root hidden>
+      <div
+        class="bluefy-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="bluefy-modal-title"
+      >
+        <h2 id="bluefy-modal-title" class="bluefy-modal-title">Use Web Bluetooth on this device</h2>
+        <p class="bluefy-modal-body">
+          This browser cannot use Bluetooth from websites. <strong>Bluefy</strong> is a free app that adds Web Bluetooth—open this same page there after installing.
+        </p>
+        <p class="bluefy-modal-hint">Your site must be served over HTTPS (required for Web Bluetooth in Bluefy).</p>
+        <div class="bluefy-modal-actions">
+          <a
+            class="bluefy-modal-store"
+            href="${BLUEFY_APP_STORE_URL}"
+            target="_blank"
+            rel="noopener noreferrer"
+          >Get Bluefy on the App Store</a>
+          <button type="button" class="bluefy-modal-dismiss" data-bluefy-dismiss>Not now</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+/** Plain-language hint when `navigator.bluetooth` is missing (shown under the main support line). */
+export function webBluetoothUnsupportedDetail(): string {
+  if (typeof navigator === "undefined") {
+    return "Use Chrome or Edge on a computer or Android device with Bluetooth.";
+  }
+  const ua = navigator.userAgent;
+  if (/iPhone|iPad|iPod/i.test(ua)) {
+    return "On iPhone and iPad, Safari and Chrome cannot use Web Bluetooth. Use the free Bluefy browser from the App Store, or Android with Chrome / a desktop browser.";
+  }
+  if (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1) {
+    return "On iPadOS, websites cannot use Web Bluetooth in Safari or Chrome. Use Bluefy from the App Store, or Android with Chrome / a desktop browser.";
+  }
+  if (typeof window !== "undefined" && !window.isSecureContext) {
+    return "Web Bluetooth only works on a secure origin. Open this app over HTTPS or http://localhost.";
+  }
+  return "Use Google Chrome or Microsoft Edge on Windows, macOS, or Android with Bluetooth. Firefox and most non-Chromium browsers do not support Web Bluetooth.";
+}
+
 export function renderPanelTemplate(isSupported: boolean): string {
   const channelLabel = (channel: PaintChannel): string =>
     channel === "luma" ? "Y" : channel.charAt(0).toUpperCase();
@@ -173,6 +272,11 @@ export function renderPanelTemplate(isSupported: boolean): string {
           <p data-support class="${isSupported ? "ok" : "warn"}">
             Web Bluetooth ${isSupported ? "is available" : "is not available"} in this browser.
           </p>
+          ${
+            isSupported
+              ? ""
+              : `<p data-support-detail class="warn support-detail">${webBluetoothUnsupportedDetail()}</p>`
+          }
         </div>
         <div class="connection-controls">
           <p data-connection class="pill">Disconnected</p>
@@ -559,6 +663,7 @@ export function renderPanelTemplate(isSupported: boolean): string {
         </div>
         <ul class="debug-log" data-log></ul>
       </section>
+      ${!isSupported && isIosLikeWebBluetoothBlocked() ? renderBluefyOfferModal() : ""}
     </main>
   `;
 }

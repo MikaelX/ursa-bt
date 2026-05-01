@@ -1,3 +1,6 @@
+@import "@fontsource/dseg7-classic/400.css";
+@import "@fontsource/dseg7-classic/700.css";
+
 :root {
   color-scheme: dark;
   color: #f5f7fa;
@@ -5,6 +8,7 @@
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
+  --font-led: "DSEG7 Classic", "Share Tech Mono", "SFMono-Regular", ui-monospace, monospace;
   --bg: #0b0d10;
   --chassis: #1f2125;
   --chassis-border: #2c2f33;
@@ -28,10 +32,16 @@
   box-sizing: border-box;
 }
 
+html {
+  -webkit-tap-highlight-color: transparent;
+}
+
 body {
   margin: 0;
   min-height: 100vh;
   background: radial-gradient(circle at top, #1a1d22 0%, #050608 100%);
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 button,
@@ -50,6 +60,17 @@ button {
   padding: 0.65rem 0.9rem;
   font-weight: 600;
   transition: transform 80ms ease, background 120ms ease, border-color 120ms ease;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:focus {
+  outline: none;
+}
+
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 button:hover:not(:disabled) {
@@ -75,6 +96,8 @@ select {
   color: #f5f7fa;
   padding: 0.55rem 0.75rem;
   width: 100%;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 label {
@@ -132,6 +155,17 @@ label {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
   gap: 0.5rem;
+}
+
+/* Primary CTA before a BLE session; Disconnect stays muted until connected */
+.connection-controls:not(.is-ble-connected) .button-row > [data-connect]:not(:disabled) {
+  background: linear-gradient(180deg, #2d5a8f, #1a3d62);
+  border-color: rgba(88, 166, 255, 0.45);
+  box-shadow: 0 0 14px rgba(88, 166, 255, 0.22);
+}
+
+.connection-controls:not(.is-ble-connected) .button-row > [data-disconnect]:disabled {
+  opacity: 0.42;
 }
 
 .auto-reconnect-toggle {
@@ -199,6 +233,104 @@ label {
   color: #fbbf24;
 }
 
+.support-detail {
+  margin: 0.5rem 0 0;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: #d1d5db;
+  max-width: 36rem;
+}
+
+body.bluefy-modal-open {
+  overflow: hidden;
+}
+
+.bluefy-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgba(5, 6, 8, 0.72);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: manipulation;
+}
+
+.bluefy-modal-backdrop[hidden] {
+  display: none !important;
+}
+
+.bluefy-modal {
+  width: min(100%, 22.5rem);
+  padding: 1.15rem 1.2rem 1.2rem;
+  border-radius: 1rem;
+  background: linear-gradient(180deg, #25282d 0%, #181a1e 100%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow:
+    0 24px 48px rgba(0, 0, 0, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.bluefy-modal-title {
+  margin: 0 0 0.65rem;
+  font-size: 1.05rem;
+  font-weight: 700;
+  line-height: 1.3;
+  color: #f5f7fa;
+}
+
+.bluefy-modal-body,
+.bluefy-modal-hint {
+  margin: 0 0 0.55rem;
+  font-size: 0.85rem;
+  line-height: 1.45;
+  color: #c4cad2;
+}
+
+.bluefy-modal-hint {
+  margin-bottom: 0.95rem;
+  font-size: 0.78rem;
+  color: #9ca3af;
+}
+
+.bluefy-modal-actions {
+  display: grid;
+  gap: 0.5rem;
+}
+
+a.bluefy-modal-store {
+  display: block;
+  text-align: center;
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 0.88rem;
+  padding: 0.75rem 0.9rem;
+  border-radius: 0.65rem;
+  color: #fff;
+  background: linear-gradient(180deg, #2d5a8f, #1a3d62);
+  border: 1px solid rgba(88, 166, 255, 0.45);
+  box-shadow: 0 0 14px rgba(88, 166, 255, 0.22);
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+a.bluefy-modal-store:active {
+  transform: translateY(1px);
+}
+
+button.bluefy-modal-dismiss {
+  width: 100%;
+  margin: 0;
+  background: var(--button);
+  font-weight: 600;
+  font-size: 0.82rem;
+  padding: 0.62rem 0.85rem;
+}
+
 /* Chassis */
 .chassis {
   border-radius: 1.4rem;
@@ -247,16 +379,25 @@ label {
 }
 
 .stepper-segment {
+  font-family: var(--font-led);
+  font-weight: 400;
   font-size: 1.45rem;
-  letter-spacing: 0.08em;
-  padding: 0.45rem 0.55rem;
+  letter-spacing: 0.1em;
+  font-variant-ligatures: none;
+  padding: 0.42rem 0.6rem 0.38rem;
   text-align: center;
   border-radius: 0.4rem;
   background: #050608;
   color: #f3f6fa;
-  text-shadow: 0 0 6px rgba(255, 255, 255, 0.15);
+  text-shadow:
+    0 0 8px rgba(255, 255, 255, 0.2),
+    0 0 12px rgba(108, 240, 140, 0.15);
   grid-column: 1;
   grid-row: 1;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .stepper-buttons {
@@ -450,23 +591,33 @@ label {
 }
 
 .segmented {
-  font-family: "DSEG7-Classic", "Share Tech Mono", "SFMono-Regular", Consolas, monospace;
-  font-size: 1.1rem;
-  letter-spacing: 0.05em;
+  font-family: var(--font-led);
+  font-weight: 400;
+  font-size: 1.15rem;
+  letter-spacing: 0.12em;
+  font-variant-ligatures: none;
   color: var(--segment-text);
   background: var(--segment-bg);
   border-radius: 0.45rem;
-  padding: 0.45rem 0.6rem;
+  padding: 0.42rem 0.65rem 0.38rem;
   text-align: right;
   border: 1px solid #1a1d20;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), inset 0 -2px 6px rgba(0, 0, 0, 0.6);
-  text-shadow: 0 0 8px rgba(108, 240, 140, 0.35);
+  text-shadow:
+    0 0 6px rgba(108, 240, 140, 0.55),
+    0 0 14px rgba(108, 240, 140, 0.25);
   min-height: 2.1rem;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
 }
 
 .segmented.big {
-  font-size: 1.6rem;
-  padding: 0.55rem 0.7rem;
+  font-size: 1.72rem;
+  padding: 0.48rem 0.72rem 0.42rem;
+  letter-spacing: 0.1em;
+  min-height: 2.55rem;
 }
 
 .segmented.red-readout {
@@ -792,16 +943,25 @@ label {
   border-radius: 0.3rem;
   background: rgba(108, 240, 140, 0.06);
   border: 1px solid rgba(108, 240, 140, 0.15);
-  color: rgba(108, 240, 140, 0.25);
-  font-family: "DSEG7-Classic", "Share Tech Mono", monospace;
-  font-size: 1rem;
+  color: rgba(108, 240, 140, 0.35);
+  font-family: var(--font-led);
   font-weight: 700;
+  font-size: 1.05rem;
   line-height: 1;
+  letter-spacing: 0.02em;
+  font-variant-ligatures: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   text-shadow: none;
   transition: background 120ms ease, color 120ms ease, box-shadow 120ms ease;
+}
+
+.cam-led-digit {
+  display: block;
+  position: relative;
+  top: 0.03em;
+  margin-bottom: -0.06em;
 }
 
 .cam-led.on {
@@ -976,6 +1136,28 @@ label {
   pointer-events: none;
 }
 
+.h-fader-track::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 14px;
+  transform: translateY(-50%);
+  pointer-events: none;
+  /* 6 white ticks at 0%, 20%, 40%, 60%, 80%, 100% across the track */
+  background-image:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.85)),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.85)),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.85)),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.85)),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.85)),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.85));
+  background-repeat: no-repeat;
+  background-size: 1px 100%;
+  background-position: 0% 50%, 20% 50%, 40% 50%, 60% 50%, 80% 50%, 100% 50%;
+}
+
 .h-fader-handle {
   position: absolute;
   top: calc(50% - 7px);
@@ -1003,6 +1185,7 @@ label {
     linear-gradient(180deg, #3d4147, #1a1c1f);
   border: 1px solid #050607;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+  transform: rotate(90deg);
 }
 
 .h-fader-cap::before {
@@ -1080,6 +1263,28 @@ label {
   border-radius: 3px;
   box-shadow: inset 0 0 4px rgba(0, 0, 0, 0.7);
   pointer-events: none;
+}
+
+.iris-joystick-track::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 16px;
+  transform: translateX(-50%);
+  pointer-events: none;
+  /* 6 white ticks at 0%, 20%, 40%, 60%, 80%, 100% — aligned with scale labels */
+  background-image:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.85)),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.85)),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.85)),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.85)),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.85)),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.85));
+  background-repeat: no-repeat;
+  background-size: 100% 1px;
+  background-position: 50% 0%, 50% 20%, 50% 40%, 50% 60%, 50% 80%, 50% 100%;
 }
 
 .iris-joystick-handle {
@@ -1466,6 +1671,8 @@ label {
   color: #b9c0c8;
   display: grid;
   gap: 0.2rem;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .debug-log li {
@@ -1497,10 +1704,12 @@ label {
     grid-column: auto;
     min-width: 0;
     width: 100%;
+    justify-self: end;
   }
   .iris-side-buttons {
     grid-area: side;
     grid-column: auto;
+    width: 100%;
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
   .iris-side-buttons .side-btn {
@@ -1510,7 +1719,7 @@ label {
   .iris-joystick {
     height: 200px;
     width: 100%;
-    max-width: 100%;
+    max-width: 120px;
   }
   .camera-pillar {
     width: 100%;
@@ -1535,12 +1744,14 @@ label {
   .iris-joystick {
     height: 180px;
     width: 100%;
-    max-width: 100%;
+    max-width: 110px;
   }
   .iris-fader-column {
-    justify-self: stretch;
+    justify-self: center;
+    width: 100%;
   }
   .iris-side-buttons {
+    width: 100%;
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
   .iris-side-buttons .side-btn {
@@ -1761,6 +1972,28 @@ label {
   pointer-events: none;
 }
 
+.mini-fader-track::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 14px;
+  transform: translateX(-50%);
+  pointer-events: none;
+  /* 6 white ticks at 0%, 20%, 40%, 60%, 80%, 100% along the track */
+  background-image:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.85)),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.85)),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.85)),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.85)),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.85)),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.85));
+  background-repeat: no-repeat;
+  background-size: 100% 1px;
+  background-position: 50% 0%, 50% 20%, 50% 40%, 50% 60%, 50% 80%, 50% 100%;
+}
+
 .mini-fader-handle {
   position: absolute;
   top: calc(50% - 7px);
@@ -1881,7 +2114,7 @@ label {
 .panel-inactive .knob-value,
 .panel-inactive [data-led],
 .panel-inactive .scene-bank-led,
-.panel-inactive .camera-led,
+.panel-inactive .cam-led,
 .panel-inactive .footer-led,
 .panel-inactive [data-power-label],
 .panel-inactive .audio-phantom-led {

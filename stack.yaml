@@ -1,0 +1,39 @@
+# Swarm: router speaks plain WebSocket on :8080; TLS/wss at nginx (nginx_manager) on nginx-network.
+# UDP 14001 published (same as previous intercom). Image from build.sh / registry: mikaelx/unity-tunnel-server
+version: "3.8"
+
+services:
+  redis:
+    image: redis:7.2.1-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --appendfsync everysec --save 20 1
+    volumes:
+      - redis:/data
+    networks:
+      - isolated
+      - nginx-network
+    deploy:
+      replicas: 2
+
+  bluetooth:
+    image: mikaelx/bm-bluetooth:latest
+    environment:
+      DOCKER: "true"
+      ENVIRONMENT: "production"
+      PORT: 4000
+    networks:
+      - isolated
+      - nginx-network
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: always
+
+volumes:
+  redis:
+
+networks:
+  isolated:
+  nginx-network:
+    external: true

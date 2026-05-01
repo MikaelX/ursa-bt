@@ -1,0 +1,2024 @@
+/* =========================================================================
+   BM Pattern Library — hardware-panel design language
+   Self-contained; does not import or extend src/styles.css.
+   ========================================================================= */
+
+:root {
+  color-scheme: dark;
+
+  /* surfaces */
+  --bm-app-bg:       #0a0a0b;
+  --bm-panel:        #2a2a2c;
+  --bm-panel-deep:   #18181a;
+  --bm-btn-bg:       #0f0f10;
+  --bm-btn-bg-hi:    #1c1c1e;
+
+  /* type */
+  --bm-text:         #e8e8e8;
+  --bm-text-dim:     #9a9a9c;
+
+  /* accents (on / glow pairs) */
+  --led-green-on:    #7CFC4A;
+  --led-green-glow:  rgba(124, 252, 74, 0.7);
+  --led-red-on:      #ff3b30;
+  --led-red-glow:    rgba(255, 59, 48, 0.75);
+  --led-amber-on:    #ffb020;
+  --led-amber-glow:  rgba(255, 176, 32, 0.7);
+  --led-off:         #0a0a0b;
+
+  --seg-amber-on:    #ffb020;
+  --seg-amber-glow:  rgba(255, 176, 32, 0.6);
+  --seg-red-on:      #ff3b30;
+  --seg-red-glow:    rgba(255, 59, 48, 0.6);
+  --seg-green-on:    #7CFC4A;
+  --seg-green-glow:  rgba(124, 252, 74, 0.6);
+  --seg-off:         #1a0f04;
+
+  --pot2-amber:      #ffb020;
+  --pot2-amber-glow: rgba(255, 176, 32, 0.55);
+  --pan-orange:      #ff8a1f;
+  --pan-orange-glow: rgba(255, 138, 31, 0.55);
+  --gain-green:      #2ecc40;
+  --gain-green-glow: rgba(46, 204, 64, 0.55);
+  --gain-over:       #ff8a1f;
+  --gain-over-glow:  rgba(255, 138, 31, 0.55);
+  --tbar-led-on:     #7CFC4A;
+  --tbar-led-glow:   rgba(124, 252, 74, 0.55);
+  --tbar-led-off:    #1a1f1a;
+
+  --meter-green:     #2ecc40;
+  --meter-amber:     #ffb020;
+  --meter-red:       #ff3b30;
+  --meter-off:       #1a1f1a;
+
+  --glass-green-tint:#2ecc40;
+  --glass-green-glow:rgba(46, 204, 64, 0.55);
+  --glass-red-tint:  #ff3b30;
+  --glass-red-glow:  rgba(255, 59, 48, 0.55);
+  --glass-amber-tint:#ffb020;
+  --glass-amber-glow:rgba(255, 176, 32, 0.55);
+  --glass-blue-tint: #4aa3ff;
+  --glass-blue-glow: rgba(74, 163, 255, 0.55);
+  --glass-gray-tint: #6a6a6e;
+  --glass-gray-glow: rgba(0, 0, 0, 0);
+
+  --bm-focus:        #4aa3ff;
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; padding: 0; }
+
+body {
+  min-height: 100vh;
+  background:
+    radial-gradient(ellipse at top, #1a1a1c 0%, var(--bm-app-bg) 70%);
+  color: var(--bm-text);
+  font-family: -apple-system, "SF Pro Text", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* =========================================================================
+   Page chrome
+   ========================================================================= */
+
+.pl {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 32px 20px 80px;
+}
+
+.pl__hero {
+  margin-bottom: 32px;
+}
+
+.pl__title {
+  margin: 0 0 6px;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.pl__subtitle {
+  margin: 0;
+  color: var(--bm-text-dim);
+  font-size: 13px;
+}
+
+.pl__nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 16px 0 24px;
+  padding: 8px;
+  background: var(--bm-panel);
+  border-radius: 10px;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.04),
+    0 2px 4px rgba(0,0,0,0.5);
+}
+
+.pl__nav a {
+  font: 600 11px/1 -apple-system, "SF Pro Text", system-ui, sans-serif;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--bm-text-dim);
+  text-decoration: none;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--bm-panel-deep);
+  box-shadow: inset 0 1px 2px rgba(0,0,0,0.5);
+  transition: color 120ms ease, background 120ms ease;
+}
+.pl__nav a:hover { color: var(--bm-text); background: #101012; }
+
+.pl__section {
+  margin-bottom: 40px;
+  scroll-margin-top: 16px;
+}
+
+.pl__section h2 {
+  margin: 0 0 4px;
+  font-size: 16px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--bm-text);
+}
+
+.pl__section p.pl__lead {
+  margin: 0 0 16px;
+  color: var(--bm-text-dim);
+  font-size: 12px;
+  max-width: 640px;
+  line-height: 1.5;
+}
+
+.pl__demo {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 20px;
+  padding: 20px;
+  background: linear-gradient(180deg, #1a1a1c 0%, #0f0f10 100%);
+  border-radius: 12px;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.03),
+    0 2px 6px rgba(0,0,0,0.6);
+}
+
+.pl__caption {
+  width: 100%;
+  margin: 12px 0 0;
+  color: var(--bm-text-dim);
+  font: 600 10px/1.4 ui-monospace, "SF Mono", Menlo, monospace;
+  letter-spacing: 0.04em;
+}
+
+/* =========================================================================
+   Buttons (.bm-btn)
+   ========================================================================= */
+
+.bm-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 64px;
+  min-height: 32px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid #000;
+  background:
+    linear-gradient(180deg, var(--bm-btn-bg-hi) 0%, var(--bm-btn-bg) 55%, #060606 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.06),
+    inset 0 -1px 0 rgba(0,0,0,0.6),
+    0 1px 0 rgba(255,255,255,0.04),
+    0 1px 3px rgba(0,0,0,0.5);
+  color: var(--bm-text);
+  font: 600 10.5px/1 -apple-system, "SF Pro Text", system-ui, sans-serif;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  text-align: center;
+  text-shadow: 0 1px 0 rgba(0,0,0,0.6);
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: transform 60ms ease, box-shadow 60ms ease, background 120ms ease;
+}
+.bm-btn:hover {
+  background: linear-gradient(180deg, #232325 0%, #131314 55%, #080808 100%);
+}
+.bm-btn:active {
+  transform: translateY(1px);
+  box-shadow:
+    inset 0 2px 4px rgba(0,0,0,0.7),
+    inset 0 -1px 0 rgba(255,255,255,0.03);
+}
+.bm-btn:focus-visible {
+  outline: 2px solid var(--bm-focus);
+  outline-offset: 2px;
+}
+.bm-btn--active {
+  color: #fff;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.1),
+    inset 0 -1px 0 rgba(0,0,0,0.6),
+    0 0 0 1px rgba(255,255,255,0.08),
+    0 0 8px rgba(255, 200, 80, 0.32),
+    0 1px 3px rgba(0,0,0,0.5);
+  background:
+    linear-gradient(180deg, #2a2418 0%, #1a160e 55%, #0a0805 100%);
+}
+.bm-btn--call {
+  color: #fff;
+  background: linear-gradient(180deg, #c0382b 0%, #8b261c 55%, #4a130d 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.18),
+    inset 0 -1px 0 rgba(0,0,0,0.5),
+    0 1px 4px rgba(0,0,0,0.5);
+}
+.bm-btn[disabled] {
+  opacity: 0.4;
+  cursor: not-allowed;
+  filter: saturate(0.5);
+}
+
+/* =========================================================================
+   Stepper buttons (up/down)
+   ========================================================================= */
+
+.bm-stepper {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px;
+  border-radius: 10px;
+  background: var(--bm-panel-deep);
+  box-shadow:
+    inset 0 1px 2px rgba(0,0,0,0.6),
+    inset 0 -1px 0 rgba(255,255,255,0.03);
+}
+.bm-stepper__btn {
+  width: 56px;
+  height: 44px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #000;
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, var(--bm-btn-bg-hi) 0%, var(--bm-btn-bg) 55%, #060606 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.06),
+    inset 0 -1px 0 rgba(0,0,0,0.6),
+    0 1px 0 rgba(255,255,255,0.04),
+    0 2px 4px rgba(0,0,0,0.55);
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: transform 60ms ease, box-shadow 60ms ease, background 120ms ease;
+}
+.bm-stepper__btn:hover {
+  background: linear-gradient(180deg, #232325 0%, #131314 55%, #080808 100%);
+}
+.bm-stepper__btn:active {
+  transform: translateY(1px);
+  box-shadow:
+    inset 0 2px 4px rgba(0,0,0,0.7),
+    inset 0 -1px 0 rgba(255,255,255,0.03);
+}
+.bm-stepper__btn:focus-visible {
+  outline: 2px solid var(--bm-focus);
+  outline-offset: 2px;
+}
+.bm-stepper__glyph {
+  width: 14px;
+  height: 14px;
+  fill: var(--bm-text);
+  filter:
+    drop-shadow(0 1px 0 rgba(0,0,0,0.7))
+    drop-shadow(0 0 1px rgba(0,0,0,0.4));
+  transition: fill 120ms ease;
+}
+.bm-stepper__btn:active .bm-stepper__glyph,
+.bm-stepper__btn[data-repeating="true"] .bm-stepper__glyph {
+  fill: #fff;
+}
+
+/* 7-segment readout beside stepper (matches .bm-seg2__display window) */
+.bm-stepper__readout {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  align-self: stretch;
+}
+.bm-stepper__readout .bm-seg2__display {
+  justify-content: center;
+  min-width: 136px; /* room for three digits without horizontal jump */
+  min-height: 72px; /* digit 56px + display vertical padding */
+}
+
+/* =========================================================================
+   Mini-pot (.bm-pot)
+   ========================================================================= */
+
+.bm-pot {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 14px 8px;
+  background: var(--bm-panel);
+  border-radius: 8px;
+  user-select: none;
+  touch-action: none;
+}
+.bm-pot__knob {
+  --size: 64px;
+  position: relative;
+  width: var(--size);
+  height: var(--size);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 50% 30%,
+      #2a2a2d 0%, #18181a 35%, #0a0a0b 70%, #050506 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.10),
+    inset 0 -2px 4px rgba(0,0,0,0.7),
+    0 1px 0 rgba(255,255,255,0.04),
+    0 3px 6px rgba(0,0,0,0.55),
+    0 0 0 1px #000;
+  cursor: grab;
+  transform: rotate(var(--angle, 0deg));
+  transition: box-shadow 120ms ease;
+}
+.bm-pot__knob:active { cursor: grabbing; }
+.bm-pot__knob:focus-visible {
+  outline: none;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.10),
+    inset 0 -2px 4px rgba(0,0,0,0.7),
+    0 0 0 2px var(--bm-focus),
+    0 3px 6px rgba(0,0,0,0.55);
+}
+.bm-pot__indicator {
+  position: absolute;
+  left: 50%;
+  top: 8px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #f0f0f0;
+  transform: translateX(-50%);
+  box-shadow:
+    0 0 4px rgba(255,255,255,0.5),
+    0 0 1px rgba(0,0,0,0.8);
+}
+.bm-pot__labels {
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+  font: 600 10px/1 -apple-system, "SF Pro Text", system-ui, sans-serif;
+  letter-spacing: 0.08em;
+  color: var(--bm-text);
+  text-shadow: 0 1px 0 rgba(0,0,0,0.6);
+}
+.bm-pot__mode {
+  font: 600 10px/1 -apple-system, "SF Pro Text", system-ui, sans-serif;
+  letter-spacing: 0.12em;
+  color: var(--bm-text-dim);
+  text-shadow: 0 1px 0 rgba(0,0,0,0.6);
+}
+
+/* =========================================================================
+   Inside-pot (.bm-pot2) — premium rotary
+   ========================================================================= */
+
+.bm-pot2 {
+  --size: 72px;
+  --tick-pad: 5px;
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  background: var(--bm-panel);
+  border-radius: 12px;
+  user-select: none;
+  touch-action: none;
+}
+
+/* Very faint outer tick ring around the knob — only just perceptible */
+.bm-pot2__ticks {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  width:  calc(var(--size) + var(--tick-pad) * 2);
+  height: calc(var(--size) + var(--tick-pad) * 2);
+  border-radius: 50%;
+  pointer-events: none;
+  background:
+    repeating-conic-gradient(
+      from -135deg,
+      rgba(255,255,255,0.10) 0deg 0.6deg,
+      transparent            0.6deg 22.5deg
+    );
+  -webkit-mask:
+    radial-gradient(circle,
+      transparent calc(50% - 3px),
+      #000        calc(50% - 2px),
+      #000        calc(50% - 0.5px),
+      transparent 50%);
+          mask:
+    radial-gradient(circle,
+      transparent calc(50% - 3px),
+      #000        calc(50% - 2px),
+      #000        calc(50% - 0.5px),
+      transparent 50%);
+}
+
+.bm-pot2__knob {
+  position: relative;
+  width: var(--size);
+  height: var(--size);
+  border-radius: 50%;
+  cursor: grab;
+  transform: rotate(var(--angle, 0deg));
+  filter: drop-shadow(0 3px 5px rgba(0,0,0,0.55));
+  transition: filter 120ms ease;
+}
+.bm-pot2__knob:active { cursor: grabbing; }
+.bm-pot2__knob:focus-visible { outline: none; }
+.bm-pot2__knob:focus-visible .bm-pot2__rim {
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.10),
+    inset 0 -1px 1px rgba(0,0,0,0.6),
+    0 0 0 2px var(--bm-focus);
+}
+
+/* Single smooth dark disc with a soft top sheen */
+.bm-pot2__rim {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 50% 22%,
+      rgba(255,255,255,0.14) 0%,
+      rgba(255,255,255,0.0) 38%),
+    linear-gradient(180deg, #28282b 0%, #18181a 55%, #0c0c0e 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.10),
+    inset 0 -1px 1px rgba(0,0,0,0.6),
+    0 0 0 1px rgba(0,0,0,0.7);
+}
+
+/* Subtle inner ring that suggests a shallow recessed face without the busy second disc */
+.bm-pot2__face {
+  position: absolute;
+  inset: 8%;
+  border-radius: 50%;
+  background: transparent;
+  box-shadow:
+    inset 0 1px 1px rgba(0,0,0,0.45),
+    inset 0 -1px 0 rgba(255,255,255,0.04);
+  pointer-events: none;
+}
+
+/* Small white indicator dot near the top edge (replaces the glowing amber line) */
+.bm-pot2__indicator {
+  position: absolute;
+  top: 9%;
+  left: 50%;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  transform: translateX(-50%);
+  background: #f0f1f4;
+  box-shadow:
+    0 0 0 1px rgba(0,0,0,0.55),
+    0 0 2px rgba(255,255,255,0.35);
+}
+
+.bm-pot2__label {
+  margin-top: 2px;
+  font: 700 10px/1 -apple-system, "SF Pro Text", system-ui, sans-serif;
+  letter-spacing: 0.18em;
+  color: var(--bm-text-dim);
+  text-shadow: 0 1px 0 rgba(0,0,0,0.6);
+  text-transform: uppercase;
+}
+
+/* =========================================================================
+   Status LEDs (.bm-led)
+   ========================================================================= */
+
+.bm-status-leds {
+  display: inline-flex;
+  gap: 4px;
+  background: var(--bm-panel);
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.04),
+    0 2px 4px rgba(0,0,0,0.5);
+}
+.bm-led {
+  --color-on:   var(--led-green-on);
+  --color-glow: var(--led-green-glow);
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 64px;
+  padding: 6px 10px 5px;
+  border-radius: 6px;
+  background: var(--bm-panel-deep);
+  box-shadow:
+    inset 0 1px 2px rgba(0,0,0,0.6),
+    inset 0 -1px 0 rgba(255,255,255,0.03);
+}
+.bm-led--red   { --color-on: var(--led-red-on);   --color-glow: var(--led-red-glow); }
+.bm-led--amber { --color-on: var(--led-amber-on); --color-glow: var(--led-amber-glow); }
+
+.bm-led__lamp {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 35% 30%,
+      rgba(255,255,255,0.08) 0%, var(--led-off) 70%);
+  box-shadow:
+    inset 0 0 1px rgba(0,0,0,0.8),
+    inset 0 1px 1px rgba(0,0,0,0.6);
+  transition: background 120ms ease, box-shadow 200ms ease;
+}
+.bm-led[data-state="on"] .bm-led__lamp {
+  background:
+    radial-gradient(circle at 35% 30%,
+      #ffffff 0%, var(--color-on) 45%,
+      color-mix(in srgb, var(--color-on) 50%, #000) 100%);
+  box-shadow:
+    0 0 2px var(--color-on),
+    0 0 6px var(--color-glow),
+    0 0 10px var(--color-glow);
+}
+.bm-led[data-state="blink"] .bm-led__lamp {
+  background:
+    radial-gradient(circle at 35% 30%,
+      #ffffff 0%, var(--color-on) 45%,
+      color-mix(in srgb, var(--color-on) 50%, #000) 100%);
+  animation: bm-led-blink 1.1s steps(1, end) infinite;
+}
+@keyframes bm-led-blink {
+  0%, 49% {
+    box-shadow:
+      0 0 2px var(--color-on),
+      0 0 6px var(--color-glow),
+      0 0 10px var(--color-glow);
+    opacity: 1;
+  }
+  50%, 100% {
+    box-shadow: inset 0 0 1px rgba(0,0,0,0.8);
+    opacity: 0.45;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bm-led[data-state="blink"] .bm-led__lamp { animation: none; }
+}
+.bm-led__label {
+  font: 700 10px/1 -apple-system, "SF Pro Text", system-ui, sans-serif;
+  letter-spacing: 0.14em;
+  color: var(--bm-text);
+  text-shadow: 0 1px 0 rgba(0,0,0,0.6);
+  text-transform: uppercase;
+}
+
+/* =========================================================================
+   Dot-matrix display (.bm-cam-id)
+   ========================================================================= */
+
+.bm-cam-id {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: stretch;
+  background: var(--bm-panel);
+  border-radius: 10px;
+  padding: 10px 12px 8px;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.04),
+    0 2px 4px rgba(0,0,0,0.5);
+  user-select: none;
+}
+.bm-cam-id__display {
+  --cols: 5;
+  --rows: 7;
+  --dot: 8px;
+  --gap: 4px;
+  display: grid;
+  grid-template-columns: repeat(var(--cols), var(--dot));
+  grid-template-rows:    repeat(var(--rows), var(--dot));
+  gap: var(--gap);
+  justify-content: center;
+  align-content: center;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background:
+    radial-gradient(circle at center,
+      rgba(0,0,0,0) 35%, rgba(0,0,0,0.45) 100%),
+    var(--bm-panel-deep);
+  box-shadow:
+    inset 0 2px 4px rgba(0,0,0,0.7),
+    inset 0 -1px 0 rgba(255,255,255,0.03);
+}
+.bm-cam-id__display > i {
+  display: block;
+  width: var(--dot);
+  height: var(--dot);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 35% 30%,
+      rgba(255,255,255,0.06) 0%, #1a1f1a 70%);
+  box-shadow: inset 0 0 1px rgba(0,0,0,0.6);
+}
+.bm-cam-id__display > i.on {
+  background:
+    radial-gradient(circle at 35% 30%,
+      #b6ff8a 0%, var(--led-green-on) 55%, #3a8a1f 100%);
+  box-shadow:
+    0 0 2px var(--led-green-on),
+    0 0 6px rgba(124, 252, 74, 0.85),
+    0 0 12px rgba(124, 252, 74, 0.45);
+}
+.bm-cam-id__label {
+  margin-top: 6px;
+  text-align: center;
+  font: 700 11px/1 -apple-system, "SF Pro Text", system-ui, sans-serif;
+  letter-spacing: 0.18em;
+  color: var(--bm-text);
+  text-shadow: 0 1px 0 rgba(0,0,0,0.6);
+}
+
+/* =========================================================================
+   7-segment digits (.bm-seg, .bm-seg2, .bm-seg4)
+   ========================================================================= */
+
+.bm-seg, .bm-seg2, .bm-seg4 {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 10px 12px 8px;
+  border-radius: 10px;
+  background: var(--bm-panel);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.04),
+    0 2px 4px rgba(0,0,0,0.5);
+  user-select: none;
+}
+
+/* Recessed window for the digits — used by single-digit and multi-digit displays.
+   The window stays upright; only the .bm-seg__digit children inside it are skewed. */
+.bm-seg__digit-window {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background:
+    radial-gradient(ellipse at center,
+      rgba(0,0,0,0) 35%, rgba(0,0,0,0.55) 100%),
+    var(--bm-panel-deep);
+  box-shadow:
+    inset 0 2px 4px rgba(0,0,0,0.75),
+    inset 0 -1px 0 rgba(255,255,255,0.03);
+}
+
+/* Font-based 7-segment digit, with a dim "8" ghost layer behind for unlit segments */
+.bm-seg__digit {
+  --color-on:   var(--seg-amber-on);
+  --color-glow: var(--seg-amber-glow);
+  --color-off:  rgba(255, 176, 32, 0.10);
+  --digit-size: 44px;
+  --digit-skew: -8deg;
+
+  position: relative;
+  display: inline-block;
+  font-family: "DSEG7 Classic", "Share Tech Mono", "SFMono-Regular", ui-monospace, monospace;
+  font-weight: 700;
+  font-size: var(--digit-size);
+  line-height: 1;
+  letter-spacing: 0;
+  text-align: center;
+  color: transparent; /* layout only; rendered by ghost + value layers */
+  transform: skewX(var(--digit-skew));
+}
+
+.bm-seg--red   .bm-seg__digit { --color-on: var(--seg-red-on);   --color-glow: var(--seg-red-glow);   --color-off: rgba(255, 59, 48, 0.10); }
+.bm-seg--green .bm-seg__digit { --color-on: var(--seg-green-on); --color-glow: var(--seg-green-glow); --color-off: rgba(124, 252, 74, 0.10); }
+
+.bm-seg__ghost,
+.bm-seg__value {
+  font-family: inherit;
+  font-weight: inherit;
+  font-size: inherit;
+  font-style: inherit;
+  line-height: 1;
+  letter-spacing: inherit;
+  text-align: center;
+  font-variant-ligatures: none;
+}
+
+.bm-seg__ghost {
+  /* Always renders "8" or "8." in dim color so unlit segments stay faintly visible */
+  display: block;
+  color: var(--color-off);
+  text-shadow: none;
+}
+
+.bm-seg__value {
+  /* Lit digit, overlaid exactly on the ghost — same layout model so glyphs align */
+  position: absolute;
+  inset: 0;
+  display: block;
+  color: var(--color-on);
+  text-shadow:
+    0 0 1px var(--color-on),
+    0 0 4px var(--color-glow);
+  pointer-events: none;
+}
+
+/* shared multi-digit windows */
+.bm-seg2__display, .bm-seg4__display {
+  display: inline-flex;
+  gap: 2px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background:
+    radial-gradient(ellipse at center,
+      rgba(0,0,0,0) 40%, rgba(0,0,0,0.55) 100%),
+    var(--bm-panel-deep);
+  box-shadow:
+    inset 0 2px 4px rgba(0,0,0,0.75),
+    inset 0 -1px 0 rgba(255,255,255,0.03);
+}
+.bm-seg__label, .bm-seg2__label, .bm-seg4__label {
+  text-align: center;
+  font: 700 11px/1 -apple-system, "SF Pro Text", system-ui, sans-serif;
+  letter-spacing: 0.18em;
+  color: var(--bm-text);
+  text-shadow: 0 1px 0 rgba(0,0,0,0.6);
+  text-transform: uppercase;
+}
+
+/* =========================================================================
+   Dividers
+   ========================================================================= */
+
+.bm-divider {
+  display: block;
+  border: 0;
+  margin: 12px 0;
+  padding: 0;
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #050506 0%, #0a0a0b 60%, #141416 100%);
+  box-shadow:
+    inset 0 1px 2px rgba(0,0,0,0.9),
+    inset 0 -1px 0 rgba(255,255,255,0.04),
+    0 1px 0 rgba(255,255,255,0.05);
+}
+.bm-divider--vertical {
+  width: 4px;
+  height: 100%;
+  margin: 0 12px;
+  background: linear-gradient(90deg, #050506 0%, #0a0a0b 60%, #141416 100%);
+  box-shadow:
+    inset 1px 0 2px rgba(0,0,0,0.9),
+    inset -1px 0 0 rgba(255,255,255,0.04),
+    1px 0 0 rgba(255,255,255,0.05);
+}
+.bm-divider--subtle {
+  height: 1px;
+  background: rgba(0,0,0,0.6);
+  box-shadow: 0 1px 0 rgba(255,255,255,0.04);
+}
+
+/* =========================================================================
+   Glass buttons (.bm-glass)
+   ========================================================================= */
+
+.bm-glass-row {
+  display: inline-flex;
+  gap: 6px;
+  padding: 6px;
+  background: var(--bm-panel-deep);
+  border-radius: 10px;
+  box-shadow:
+    inset 0 1px 2px rgba(0,0,0,0.6),
+    inset 0 -1px 0 rgba(255,255,255,0.03);
+}
+.bm-glass {
+  --tint: var(--glass-gray-tint);
+  --glow: var(--glass-gray-glow);
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 56px;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid #000;
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--tint) 45%, #000) 0%,
+      color-mix(in srgb, var(--tint) 25%, #000) 60%,
+      #050506 100%);
+  /* No outer glow in the unlit/off state — glow is reserved for [data-state="lit"]. */
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.18),
+    inset 0 -2px 4px rgba(0,0,0,0.55),
+    0 1px 0 rgba(255,255,255,0.04),
+    0 2px 4px rgba(0,0,0,0.55);
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: transform 60ms ease, box-shadow 120ms ease, background 160ms ease, filter 160ms ease;
+  font: inherit;
+  color: inherit;
+}
+.bm-glass--green { --tint: var(--glass-green-tint); --glow: var(--glass-green-glow); }
+.bm-glass--red   { --tint: var(--glass-red-tint);   --glow: var(--glass-red-glow); }
+.bm-glass--amber { --tint: var(--glass-amber-tint); --glow: var(--glass-amber-glow); }
+.bm-glass--blue  { --tint: var(--glass-blue-tint);  --glow: var(--glass-blue-glow); }
+.bm-glass--gray  { --tint: var(--glass-gray-tint);  --glow: var(--glass-gray-glow); }
+
+.bm-glass::before {
+  content: "";
+  position: absolute;
+  inset: 1px 1px auto 1px;
+  height: 45%;
+  border-radius: 7px 7px 12px 12px / 7px 7px 100% 100%;
+  background: linear-gradient(180deg,
+    rgba(255,255,255,0.35) 0%,
+    rgba(255,255,255,0.10) 60%,
+    rgba(255,255,255,0)    100%);
+  pointer-events: none;
+  opacity: 0.9;
+  transition: opacity 160ms ease;
+}
+.bm-glass[data-state="lit"] {
+  background:
+    radial-gradient(ellipse at 50% 120%,
+      color-mix(in srgb, var(--tint) 95%, #fff 5%) 0%,
+      var(--tint) 40%,
+      color-mix(in srgb, var(--tint) 60%, #000) 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.35),
+    inset 0 -2px 4px rgba(0,0,0,0.4),
+    0 1px 0 rgba(255,255,255,0.06),
+    0 2px 4px rgba(0,0,0,0.55),
+    0 0 16px var(--glow),
+    0 0 28px var(--glow);
+}
+.bm-glass[data-state="dim"] { filter: saturate(0.7) brightness(0.85); }
+.bm-glass[data-state="off"] {
+  background:
+    linear-gradient(180deg, #2a2a2c 0%, #1a1a1c 60%, #0a0a0b 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.06),
+    inset 0 -2px 4px rgba(0,0,0,0.55),
+    0 1px 0 rgba(255,255,255,0.04),
+    0 2px 4px rgba(0,0,0,0.55);
+}
+.bm-glass[data-state="off"]::before { opacity: 0.4; }
+.bm-glass:hover { filter: brightness(1.05); }
+.bm-glass:active {
+  transform: translateY(1px);
+  box-shadow:
+    inset 0 2px 4px rgba(0,0,0,0.6),
+    inset 0 -1px 0 rgba(255,255,255,0.04);
+}
+/* Pressed lit buttons retain their outer glow so the press doesn't extinguish them. */
+.bm-glass[data-state="lit"]:active {
+  box-shadow:
+    inset 0 2px 4px rgba(0,0,0,0.6),
+    inset 0 -1px 0 rgba(255,255,255,0.04),
+    0 0 16px var(--glow),
+    0 0 28px var(--glow);
+}
+.bm-glass:focus-visible {
+  outline: 2px solid var(--bm-focus);
+  outline-offset: 2px;
+}
+.bm-glass[disabled],
+.bm-glass[aria-disabled="true"] {
+  opacity: 0.4;
+  cursor: not-allowed;
+  filter: saturate(0.5);
+}
+.bm-glass__label {
+  position: relative;
+  z-index: 1;
+  font: 700 12px/1 -apple-system, "SF Pro Text", system-ui, sans-serif;
+  letter-spacing: 0.04em;
+  color: #fff;
+  text-shadow:
+    0 1px 0 rgba(0,0,0,0.6),
+    0 0 4px rgba(0,0,0,0.4);
+}
+.bm-glass[data-state="off"] .bm-glass__label {
+  color: var(--bm-text-dim);
+  text-shadow: 0 1px 0 rgba(0,0,0,0.7);
+}
+.bm-glass--onair { min-width: 72px; letter-spacing: 0.12em; }
+.bm-glass--onair[data-state="lit"] {
+  animation: bm-glass-onair 1.1s steps(1, end) infinite;
+}
+@keyframes bm-glass-onair {
+  0%, 49%   { box-shadow:
+                inset 0 1px 0 rgba(255,255,255,0.35),
+                inset 0 -2px 4px rgba(0,0,0,0.4),
+                0 0 18px var(--glow),
+                0 0 32px var(--glow); }
+  50%, 100% { box-shadow:
+                inset 0 1px 0 rgba(255,255,255,0.18),
+                inset 0 -2px 4px rgba(0,0,0,0.55),
+                0 0 6px var(--glow); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bm-glass--onair[data-state="lit"] { animation: none; }
+}
+
+/* =========================================================================
+   T-bar fader (.bm-tbar)
+   ========================================================================= */
+
+.bm-tbar {
+  --w: 88px;
+  --h: 360px;
+  --travel: 280px;
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  width: var(--w);
+  height: var(--h);
+  padding: 14px 12px 16px;
+  background: var(--bm-panel);
+  border-radius: 12px;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.04),
+    0 2px 4px rgba(0,0,0,0.5);
+  user-select: none;
+  touch-action: none;
+}
+.bm-tbar__shaft {
+  position: relative;
+  width: 100%;
+  flex: 1 1 auto;
+  border-radius: 8px;
+  background:
+    radial-gradient(ellipse at 50% 0%,
+      rgba(0,0,0,0.5) 0%, rgba(0,0,0,0) 60%),
+    linear-gradient(180deg, #0a0a0b 0%, #050506 100%);
+  box-shadow:
+    inset 0 2px 6px rgba(0,0,0,0.85),
+    inset 0 -1px 0 rgba(255,255,255,0.03);
+}
+.bm-tbar__ticks {
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  width: 14px;
+  background:
+    repeating-linear-gradient(
+      to bottom,
+      rgba(255,255,255,0.18) 0 1px,
+      transparent           1px 14px
+    );
+}
+.bm-tbar__ticks--left  { left: 4px;
+  -webkit-mask: linear-gradient(to right, #000 0 8px, transparent 8px 100%);
+          mask: linear-gradient(to right, #000 0 8px, transparent 8px 100%);
+}
+.bm-tbar__ticks--right { right: 4px;
+  -webkit-mask: linear-gradient(to left, #000 0 8px, transparent 8px 100%);
+          mask: linear-gradient(to left, #000 0 8px, transparent 8px 100%);
+}
+.bm-tbar__slot {
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 50%;
+  width: 4px;
+  transform: translateX(-50%);
+  border-radius: 2px;
+  background: linear-gradient(180deg, #000 0%, #050506 100%);
+  box-shadow:
+    inset 0 1px 2px rgba(0,0,0,0.9),
+    inset 0 -1px 0 rgba(255,255,255,0.03);
+}
+.bm-tbar__ladder {
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 50%;
+  width: 18px;
+  transform: translateX(-50%);
+  border-radius: 4px;
+  pointer-events: none;
+  --rung-h: 6px;
+  --rung-gap: 4px;
+  --fill: 0;
+  background:
+    linear-gradient(
+      to top,
+      var(--tbar-led-on) 0%,
+      var(--tbar-led-on) calc(var(--fill) * 100%),
+      transparent       calc(var(--fill) * 100%),
+      transparent       100%
+    ),
+    repeating-linear-gradient(
+      to top,
+      var(--tbar-led-off) 0 var(--rung-h),
+      transparent          var(--rung-h) calc(var(--rung-h) + var(--rung-gap))
+    );
+  -webkit-mask: repeating-linear-gradient(
+    to top,
+    #000 0 var(--rung-h),
+    transparent var(--rung-h) calc(var(--rung-h) + var(--rung-gap))
+  );
+          mask: repeating-linear-gradient(
+    to top,
+    #000 0 var(--rung-h),
+    transparent var(--rung-h) calc(var(--rung-h) + var(--rung-gap))
+  );
+  filter:
+    drop-shadow(0 0 2px var(--tbar-led-on))
+    drop-shadow(0 0 6px var(--tbar-led-glow));
+}
+.bm-tbar__handle {
+  --handle-h: 28px;
+  --handle-w: 64px;
+  position: absolute;
+  left: 50%;
+  top: calc(26px + (1 - var(--pos, 0)) * var(--travel) - var(--handle-h) / 2);
+  transform: translateX(-50%);
+  width: var(--handle-w);
+  height: var(--handle-h);
+  cursor: grab;
+  filter: drop-shadow(0 4px 6px rgba(0,0,0,0.6));
+  transition: filter 120ms ease;
+}
+.bm-tbar__handle:active { cursor: grabbing; }
+.bm-tbar__handle:focus-visible { outline: none; }
+.bm-tbar__handle:focus-visible .bm-tbar__cap {
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.5),
+    inset 0 -1px 2px rgba(0,0,0,0.5),
+    0 0 0 2px var(--bm-focus);
+}
+.bm-tbar__cap {
+  position: absolute;
+  inset: 0;
+  border-radius: 8px;
+  border: 1px solid #000;
+  background:
+    repeating-linear-gradient(
+      90deg,
+      rgba(255,255,255,0.04) 0 1px,
+      rgba(0,0,0,0.04)        1px 2px
+    ),
+    linear-gradient(180deg,
+      #d8d8da 0%, #f4f4f6 35%, #9a9a9c 55%, #6a6a6c 80%, #2e2e30 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.7),
+    inset 0 -1px 1px rgba(0,0,0,0.5),
+    inset 0 0 0 1px rgba(255,255,255,0.1);
+}
+.bm-tbar__bar {
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  width: 6px;
+  height: 10px;
+  transform: translateX(-50%);
+  border-radius: 0 0 2px 2px;
+  background: linear-gradient(180deg, #1a1a1c 0%, #050506 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.06),
+    0 1px 2px rgba(0,0,0,0.6);
+  /* Fades in only after the T-bar passes 40 % travel; fully visible at 100 %. */
+  opacity: clamp(0, calc((var(--pos, 0) - 0.4) / 0.6), 1);
+  transition: opacity 80ms ease-out;
+  pointer-events: none;
+}
+.bm-tbar__label {
+  margin-top: 6px;
+  text-align: center;
+  font: 700 11px/1 -apple-system, "SF Pro Text", system-ui, sans-serif;
+  letter-spacing: 0.18em;
+  color: var(--bm-text);
+  text-shadow: 0 1px 0 rgba(0,0,0,0.6);
+  text-transform: uppercase;
+}
+
+/* =========================================================================
+   Audio fader (horizontal)
+   ========================================================================= */
+
+.bm-fader {
+  --w: 320px;
+  --track-h: 16px;
+  --thumb-w: 22px;
+  --thumb-h: 28px;
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  width: var(--w);
+  padding: 10px 12px;
+  background: var(--bm-panel);
+  border-radius: 10px;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.04),
+    0 2px 4px rgba(0,0,0,0.5);
+  user-select: none;
+  touch-action: none;
+}
+.bm-fader__row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+}
+/* Positioning context for the thumb so its coordinate space is the meter,
+   not the whole row (otherwise it could slide over the label or readout). */
+.bm-fader__channel {
+  position: relative;
+  /* Vertical room so the taller thumb is not clipped by overflow on the track. */
+  min-height: var(--thumb-h);
+  display: flex;
+  align-items: center;
+}
+.bm-fader__track {
+  position: relative;
+  width: 100%;
+  height: var(--track-h);
+  border-radius: 4px;
+  background: linear-gradient(180deg, #050506 0%, #0a0a0b 100%);
+  box-shadow:
+    inset 0 2px 4px rgba(0,0,0,0.85),
+    inset 0 -1px 0 rgba(255,255,255,0.03);
+  overflow: hidden;
+}
+.bm-fader__track::before {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  border-radius: 3px;
+  background: var(--meter-off);
+  -webkit-mask: repeating-linear-gradient(
+    to right, #000 0 3px, transparent 3px 5px);
+          mask: repeating-linear-gradient(
+    to right, #000 0 3px, transparent 3px 5px);
+  pointer-events: none;
+}
+.bm-fader__meter {
+  --meter: 0;
+  position: absolute;
+  inset: 2px;
+  border-radius: 3px;
+  pointer-events: none;
+  background: linear-gradient(
+    to right,
+    var(--meter-green) 0%,
+    var(--meter-green) 70%,
+    var(--meter-amber) 70%,
+    var(--meter-amber) 90%,
+    var(--meter-red)   90%,
+    var(--meter-red)   100%);
+  --rung-w: 3px;
+  --rung-gap: 2px;
+  -webkit-mask:
+    linear-gradient(to right, #000 0 calc(var(--meter) * 100%),
+                              transparent calc(var(--meter) * 100%) 100%),
+    repeating-linear-gradient(
+      to right,
+      #000 0 var(--rung-w),
+      transparent var(--rung-w) calc(var(--rung-w) + var(--rung-gap))
+    );
+  -webkit-mask-composite: source-in;
+          mask:
+    linear-gradient(to right, #000 0 calc(var(--meter) * 100%),
+                              transparent calc(var(--meter) * 100%) 100%),
+    repeating-linear-gradient(
+      to right,
+      #000 0 var(--rung-w),
+      transparent var(--rung-w) calc(var(--rung-w) + var(--rung-gap))
+    );
+          mask-composite: intersect;
+  filter:
+    drop-shadow(0 0 1px rgba(255,255,255,0.4))
+    drop-shadow(0 0 4px rgba(255,255,255,0.15));
+}
+.bm-fader__ticks {
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  bottom: 0;
+  height: 4px;
+  background:
+    repeating-linear-gradient(
+      to right,
+      rgba(255,255,255,0.18) 0 1px,
+      transparent           1px 16px
+    );
+  pointer-events: none;
+}
+.bm-fader__thumb {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: var(--thumb-w);
+  height: var(--thumb-h);
+  transform: translateY(-50%);
+  cursor: grab;
+  filter: drop-shadow(0 3px 5px rgba(0,0,0,0.6));
+  transition: filter 120ms ease;
+}
+.bm-fader__thumb:active { cursor: grabbing; }
+.bm-fader__thumb:focus-visible { outline: none; }
+.bm-fader__thumb:focus-visible .bm-fader__cap {
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.6),
+    inset 0 -1px 1px rgba(0,0,0,0.5),
+    0 0 0 2px var(--bm-focus);
+}
+.bm-fader__cap {
+  position: absolute;
+  inset: 0;
+  border-radius: 5px;
+  border: 1px solid #000;
+  background:
+    repeating-linear-gradient(0deg,
+      rgba(255,255,255,0.05) 0 1px,
+      rgba(0,0,0,0.05)        1px 2px),
+    linear-gradient(180deg,
+      #d8d8da 0%, #f4f4f6 35%, #9a9a9c 55%, #6a6a6c 80%, #2e2e30 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.7),
+    inset 0 -1px 1px rgba(0,0,0,0.5);
+}
+.bm-fader__label {
+  font: 700 11px/1 -apple-system, "SF Pro Text", system-ui, sans-serif;
+  letter-spacing: 0.18em;
+  color: var(--bm-text);
+  text-transform: uppercase;
+  text-shadow: 0 1px 0 rgba(0,0,0,0.6);
+}
+.bm-fader__readout {
+  min-width: 56px;
+  text-align: right;
+  font: 600 12px/1 ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--bm-text);
+  text-shadow: 0 1px 0 rgba(0,0,0,0.6);
+  font-variant-numeric: tabular-nums;
+}
+.bm-fader__scale {
+  display: flex;
+  justify-content: space-between;
+  padding: 0 4px;
+  font: 600 9px/1 ui-monospace, "SF Mono", Menlo, monospace;
+  letter-spacing: 0.04em;
+  color: var(--bm-text-dim);
+  text-shadow: 0 1px 0 rgba(0,0,0,0.6);
+}
+.bm-fader[data-clipping="true"] .bm-fader__track {
+  box-shadow:
+    inset 0 2px 4px rgba(0,0,0,0.85),
+    inset 0 0 0 1px var(--meter-red),
+    0 0 6px rgba(255, 59, 48, 0.45);
+}
+
+/* =========================================================================
+   Audio fader (vertical) — channel-strip style
+   ========================================================================= */
+
+.bm-vfader-bay {
+  display: inline-flex;
+  align-items: stretch;
+  gap: 12px;
+  padding: 14px;
+  background: var(--bm-panel);
+  border-radius: 12px;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.04),
+    0 4px 10px rgba(0,0,0,0.55);
+}
+
+.bm-vfader {
+  --track-w: 18px;
+  --track-h: 240px;
+  --thumb-w: 38px;
+  --thumb-h: 22px;
+  --scale-w: 32px;
+
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 8px 8px;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #1a1a1c 0%, #0f0f10 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.05),
+    inset 0 -1px 0 rgba(0,0,0,0.5);
+  user-select: none;
+  touch-action: none;
+}
+
+.bm-vfader__readout {
+  min-width: 56px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  background: #050506;
+  box-shadow:
+    inset 0 1px 2px rgba(0,0,0,0.7),
+    inset 0 -1px 0 rgba(255,255,255,0.03);
+  font: 600 11px/1 ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--bm-text);
+  text-shadow: 0 1px 0 rgba(0,0,0,0.6);
+  font-variant-numeric: tabular-nums;
+}
+
+.bm-vfader__stage {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--scale-w) auto;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.bm-vfader__scale {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 4px 0;
+  text-align: right;
+  font: 600 9px/1 ui-monospace, "SF Mono", Menlo, monospace;
+  letter-spacing: 0.04em;
+  color: var(--bm-text-dim);
+  text-shadow: 0 1px 0 rgba(0,0,0,0.6);
+}
+.bm-vfader__scale > span {
+  display: block;
+  position: relative;
+  padding-right: 8px;
+}
+.bm-vfader__scale > span::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: 50%;
+  width: 5px;
+  height: 1px;
+  background: rgba(255,255,255,0.18);
+  transform: translateY(-50%);
+}
+
+.bm-vfader__track {
+  position: relative;
+  width: calc(var(--track-w) + 28px);   /* meter ribbon to the left of the slot */
+  height: var(--track-h);
+  border-radius: 6px;
+  background: linear-gradient(90deg, #050506 0%, #0a0a0b 100%);
+  box-shadow:
+    inset 0 0 0 1px rgba(0,0,0,0.7),
+    inset 0 2px 5px rgba(0,0,0,0.85),
+    inset 0 -1px 0 rgba(255,255,255,0.03);
+  overflow: hidden;
+}
+
+/* Faint dotted track for the meter background */
+.bm-vfader__track::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  bottom: 4px;
+  width: 12px;
+  border-radius: 3px;
+  background: var(--meter-off);
+  -webkit-mask: repeating-linear-gradient(
+    to bottom, #000 0 3px, transparent 3px 5px);
+          mask: repeating-linear-gradient(
+    to bottom, #000 0 3px, transparent 3px 5px);
+  pointer-events: none;
+}
+
+/* Live multi-color rung meter — fills from bottom up */
+.bm-vfader__meter {
+  --meter: 0;
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  bottom: 4px;
+  width: 12px;
+  border-radius: 3px;
+  pointer-events: none;
+  background: linear-gradient(
+    to top,
+    var(--meter-green) 0%,
+    var(--meter-green) 70%,
+    var(--meter-amber) 70%,
+    var(--meter-amber) 90%,
+    var(--meter-red)   90%,
+    var(--meter-red)   100%);
+  --rung-h: 3px;
+  --rung-gap: 2px;
+  -webkit-mask:
+    linear-gradient(to top, #000 0 calc(var(--meter) * 100%),
+                            transparent calc(var(--meter) * 100%) 100%),
+    repeating-linear-gradient(
+      to bottom,
+      #000 0 var(--rung-h),
+      transparent var(--rung-h) calc(var(--rung-h) + var(--rung-gap))
+    );
+  -webkit-mask-composite: source-in;
+          mask:
+    linear-gradient(to top, #000 0 calc(var(--meter) * 100%),
+                            transparent calc(var(--meter) * 100%) 100%),
+    repeating-linear-gradient(
+      to bottom,
+      #000 0 var(--rung-h),
+      transparent var(--rung-h) calc(var(--rung-h) + var(--rung-gap))
+    );
+          mask-composite: intersect;
+  filter:
+    drop-shadow(0 0 1px rgba(255,255,255,0.4))
+    drop-shadow(0 0 4px rgba(255,255,255,0.15));
+}
+
+/* Recessed slot the thumb rides in */
+.bm-vfader__slot {
+  position: absolute;
+  right: 4px;
+  top: 4px;
+  bottom: 4px;
+  width: var(--track-w);
+  border-radius: 3px;
+  background: linear-gradient(180deg, #050506 0%, #0a0a0b 100%);
+  box-shadow:
+    inset 0 1px 2px rgba(0,0,0,0.85),
+    inset 0 -1px 0 rgba(255,255,255,0.03);
+  pointer-events: none;
+}
+
+.bm-vfader__thumb {
+  --pos: 0.75;
+  position: absolute;
+  right: -8px;                       /* overhang each side of the slot */
+  width: var(--thumb-w);
+  height: var(--thumb-h);
+  bottom: calc(var(--pos) * (100% - var(--thumb-h)));
+  cursor: grab;
+  filter: drop-shadow(0 4px 6px rgba(0,0,0,0.6));
+  transition: filter 120ms ease;
+}
+.bm-vfader__thumb:active { cursor: grabbing; }
+.bm-vfader__thumb:focus-visible { outline: none; }
+.bm-vfader__thumb:focus-visible .bm-vfader__cap {
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.7),
+    inset 0 -1px 1px rgba(0,0,0,0.5),
+    0 0 0 2px var(--bm-focus);
+}
+
+.bm-vfader__cap {
+  position: absolute;
+  inset: 0;
+  border-radius: 5px;
+  border: 1px solid #000;
+  background:
+    repeating-linear-gradient(90deg,
+      rgba(255,255,255,0.05) 0 1px,
+      rgba(0,0,0,0.05)        1px 2px),
+    linear-gradient(180deg,
+      #d8d8da 0%, #f4f4f6 35%, #9a9a9c 55%, #6a6a6c 80%, #2e2e30 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.7),
+    inset 0 -1px 1px rgba(0,0,0,0.5);
+}
+
+/* Thin contact line across the cap, indicates the active position */
+.bm-vfader__bar {
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  top: 50%;
+  height: 2px;
+  border-radius: 1px;
+  background: linear-gradient(180deg, #1a1a1c, #050506);
+  box-shadow: 0 1px 0 rgba(255,255,255,0.15);
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.bm-vfader__label {
+  font: 700 11px/1 -apple-system, "SF Pro Text", system-ui, sans-serif;
+  letter-spacing: 0.18em;
+  color: var(--bm-text);
+  text-transform: uppercase;
+  text-shadow: 0 1px 0 rgba(0,0,0,0.6);
+}
+
+.bm-vfader[data-clipping="true"] .bm-vfader__track {
+  box-shadow:
+    inset 0 0 0 1px var(--meter-red),
+    inset 0 2px 5px rgba(0,0,0,0.85),
+    0 0 6px rgba(255, 59, 48, 0.45);
+}
+
+/* =========================================================================
+   Audio pan pot (.bm-pan)
+   ========================================================================= */
+
+.bm-pan {
+  --size: 56px;
+  --arc-pad: 6px;
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 10px 6px;
+  background: var(--bm-panel);
+  border-radius: 10px;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.04),
+    0 2px 4px rgba(0,0,0,0.5);
+  user-select: none;
+  touch-action: none;
+}
+.bm-pan__label {
+  font: 700 11px/1 -apple-system, "SF Pro Text", system-ui, sans-serif;
+  letter-spacing: 0.18em;
+  color: var(--bm-text);
+  text-shadow: 0 1px 0 rgba(0,0,0,0.6);
+  text-transform: uppercase;
+}
+.bm-pan__knob {
+  position: relative;
+  width: calc(var(--size) + var(--arc-pad) * 2);
+  height: calc(var(--size) + var(--arc-pad) * 2);
+  cursor: grab;
+  filter: drop-shadow(0 3px 5px rgba(0,0,0,0.55));
+  transition: filter 120ms ease;
+}
+.bm-pan__knob:active { cursor: grabbing; }
+.bm-pan__knob:focus-visible { outline: none; }
+.bm-pan__knob:focus-visible .bm-pan__rim {
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.08),
+    inset 0 -2px 4px rgba(0,0,0,0.7),
+    0 0 0 2px var(--bm-focus);
+}
+.bm-pan__arc {
+  --arc: 0;
+  --sweep: 135deg;
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  background: conic-gradient(
+    from calc(180deg + min(0deg, var(--arc) * var(--sweep))),
+    var(--pan-orange) 0deg,
+    var(--pan-orange) calc(abs(var(--arc)) * var(--sweep)),
+    transparent       calc(abs(var(--arc)) * var(--sweep)),
+    transparent       360deg
+  );
+  -webkit-mask:
+    radial-gradient(circle,
+      transparent calc(50% - var(--arc-pad) - 1px),
+      #000        calc(50% - var(--arc-pad)),
+      #000        calc(50% - 1px),
+      transparent 50%);
+          mask:
+    radial-gradient(circle,
+      transparent calc(50% - var(--arc-pad) - 1px),
+      #000        calc(50% - var(--arc-pad)),
+      #000        calc(50% - 1px),
+      transparent 50%);
+  filter:
+    drop-shadow(0 0 1px var(--pan-orange))
+    drop-shadow(0 0 4px var(--pan-orange-glow));
+  opacity: clamp(0, abs(var(--arc)) * 50, 1);
+}
+.bm-pan__rim {
+  position: absolute;
+  inset: var(--arc-pad);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 50% 30%,
+      #2a2a2d 0%, #18181a 45%, #0a0a0b 80%, #050506 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.08),
+    inset 0 -2px 4px rgba(0,0,0,0.7),
+    0 0 0 1px #000;
+  transform: rotate(var(--angle, 0deg));
+}
+.bm-pan__face {
+  position: absolute;
+  inset: calc(var(--arc-pad) + 18%);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 50% 35%,
+      #1c1c1e 0%, #101012 45%, #060607 80%, #020203 100%);
+  box-shadow:
+    inset 0 2px 3px rgba(0,0,0,0.85),
+    inset 0 -1px 0 rgba(255,255,255,0.04);
+  transform: rotate(var(--angle, 0deg));
+}
+.bm-pan__indicator {
+  /* Place the bottom edge at the knob's geometric center and rotate around it.
+     Length is in absolute knob units so the tip stays inside the rim
+     (rim radius = size/2; 38% leaves comfortable margin at any angle). */
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 3px;
+  height: calc(var(--size) * 0.38);
+  border-radius: 2px;
+  background: linear-gradient(180deg,
+    #ffd6a0 0%, var(--pan-orange) 50%, #b85800 100%);
+  box-shadow:
+    0 0 2px var(--pan-orange),
+    0 0 5px var(--pan-orange-glow);
+  transform-origin: 50% 100%;
+  transform: translate(-50%, -100%) rotate(var(--angle, 0deg));
+  pointer-events: none;
+}
+.bm-pan__center-tick {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 2px;
+  height: 5px;
+  transform: translateX(-50%);
+  background: rgba(255,255,255,0.4);
+  border-radius: 1px;
+  pointer-events: none;
+}
+.bm-pan__ends {
+  display: flex;
+  justify-content: space-between;
+  width: calc(var(--size) + var(--arc-pad) * 2 + 12px);
+  margin-top: -2px;
+  font: 700 9px/1 -apple-system, "SF Pro Text", system-ui, sans-serif;
+  letter-spacing: 0.12em;
+  color: var(--bm-text-dim);
+  text-shadow: 0 1px 0 rgba(0,0,0,0.6);
+}
+.bm-pan__readout {
+  min-width: 56px;
+  padding: 2px 6px;
+  text-align: center;
+  font: 600 11px/1.2 ui-monospace, "SF Mono", Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  color: var(--bm-text);
+  background: var(--bm-panel-deep);
+  border-radius: 4px;
+  box-shadow:
+    inset 0 1px 2px rgba(0,0,0,0.6),
+    inset 0 -1px 0 rgba(255,255,255,0.03);
+}
+
+/* =========================================================================
+   Audio gain pot (.bm-gain)
+   ========================================================================= */
+
+.bm-gain {
+  --size: 72px;
+  --arc-w: 4px;
+  --arc-pad: 6px;
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 10px;
+  background: var(--bm-panel);
+  border-radius: 10px;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.04),
+    0 2px 4px rgba(0,0,0,0.5);
+  user-select: none;
+  touch-action: none;
+}
+.bm-gain__badge {
+  position: absolute;
+  top: 4px;
+  left: 6px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font: 700 9px/1 -apple-system, "SF Pro Text", system-ui, sans-serif;
+  color: var(--gain-green);
+  text-shadow:
+    0 0 2px var(--gain-green),
+    0 0 4px var(--gain-green-glow);
+  letter-spacing: 0.06em;
+  pointer-events: none;
+}
+.bm-gain__sr-label {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: -1px;
+  border: 0; padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+.bm-gain__knob {
+  position: relative;
+  width:  calc(var(--size) + var(--arc-pad) * 2);
+  height: calc(var(--size) + var(--arc-pad) * 2);
+  cursor: grab;
+  filter: drop-shadow(0 3px 5px rgba(0,0,0,0.55));
+  transition: filter 120ms ease;
+}
+.bm-gain__knob:active { cursor: grabbing; }
+.bm-gain__knob:focus-visible { outline: none; }
+.bm-gain__knob:focus-visible .bm-gain__rim {
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.08),
+    inset 0 -2px 4px rgba(0,0,0,0.7),
+    0 0 0 2px var(--bm-focus);
+}
+.bm-gain__arc {
+  /* Bipolar arc: 0° at 12 o'clock; positive arc sweeps clockwise (right),
+     negative arc sweeps counter-clockwise (= clockwise from 360° back). */
+  --arc-pos-deg: 0deg;
+  --arc-neg-deg: 0deg;
+  --over: 0;
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  background:
+    conic-gradient(
+      from 0deg,
+      color-mix(in srgb, var(--gain-green) calc((1 - var(--over)) * 100%), var(--gain-over))
+        0deg var(--arc-pos-deg),
+      transparent var(--arc-pos-deg) calc(360deg - var(--arc-neg-deg)),
+      var(--gain-green) calc(360deg - var(--arc-neg-deg)) 360deg);
+  -webkit-mask:
+    radial-gradient(circle,
+      transparent calc(50% - var(--arc-pad) - var(--arc-w)),
+      #000        calc(50% - var(--arc-pad) - var(--arc-w) + 1px),
+      #000        calc(50% - var(--arc-pad) - 1px),
+      transparent calc(50% - var(--arc-pad)));
+          mask:
+    radial-gradient(circle,
+      transparent calc(50% - var(--arc-pad) - var(--arc-w)),
+      #000        calc(50% - var(--arc-pad) - var(--arc-w) + 1px),
+      #000        calc(50% - var(--arc-pad) - 1px),
+      transparent calc(50% - var(--arc-pad)));
+  filter:
+    drop-shadow(0 0 1px var(--gain-green))
+    drop-shadow(0 0 5px var(--gain-green-glow));
+}
+
+/* Tiny "0 dB" notch at the very top of the ring */
+.bm-gain__center-mark {
+  position: absolute;
+  top: calc(var(--arc-pad) - 2px);
+  left: 50%;
+  width: 2px;
+  height: 5px;
+  border-radius: 1px;
+  background: rgba(255,255,255,0.55);
+  box-shadow: 0 0 2px rgba(255,255,255,0.4);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+.bm-gain__rim {
+  position: absolute;
+  inset: var(--arc-pad);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 50% 30%,
+      #2a2a2d 0%, #18181a 45%, #0a0a0b 80%, #050506 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.08),
+    inset 0 -2px 4px rgba(0,0,0,0.7),
+    0 0 0 1px #000;
+  transform: rotate(var(--angle, 0deg));
+}
+.bm-gain__face {
+  position: absolute;
+  inset: calc(var(--arc-pad) + 16%);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 50% 35%,
+      #1c1c1e 0%, #101012 45%, #060607 80%, #020203 100%);
+  box-shadow:
+    inset 0 2px 3px rgba(0,0,0,0.85),
+    inset 0 -1px 0 rgba(255,255,255,0.04);
+  transform: rotate(var(--angle, 0deg));
+}
+.bm-gain__indicator {
+  /* Place the bottom edge at the knob's geometric center and rotate around it.
+     Length is kept short enough that the tip always stays inside the rim. */
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 3px;
+  /* Rim radius from center is size/2 (= ~36px at size:72). Length is set to
+     ~38% of size which is well inside that radius for any rotation angle. */
+  height: calc(var(--size) * 0.38);
+  border-radius: 2px;
+  background: linear-gradient(180deg, #ffffff 0%, #c8c8ca 60%, #6a6a6c 100%);
+  box-shadow: 0 0 2px rgba(255,255,255,0.5);
+  transform-origin: 50% 100%;
+  transform: translate(-50%, -100%) rotate(var(--angle, 0deg));
+  pointer-events: none;
+}
+.bm-gain__ends {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: calc(var(--size) + var(--arc-pad) * 2 + 14px);
+  margin-top: -2px;
+  font: 700 9px/1 -apple-system, "SF Pro Text", system-ui, sans-serif;
+  letter-spacing: 0.06em;
+  color: var(--bm-text-dim);
+  text-shadow: 0 1px 0 rgba(0,0,0,0.6);
+}
+.bm-gain__center-label {
+  font-size: 8px;
+  opacity: 0.7;
+}
+.bm-gain__readout {
+  min-width: 64px;
+  padding: 3px 8px;
+  text-align: center;
+  font: 600 13px/1.2 ui-monospace, "SF Mono", Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  color: var(--bm-text);
+  background: var(--bm-panel-deep);
+  border-radius: 4px;
+  box-shadow:
+    inset 0 1px 2px rgba(0,0,0,0.6),
+    inset 0 -1px 0 rgba(255,255,255,0.03);
+}
+.bm-gain[data-over="true"] .bm-gain__readout {
+  color: var(--gain-over);
+  text-shadow: 0 0 4px var(--gain-over-glow);
+}
+
+/* =========================================================================
+   Mini volume faders (.bm-mfader)
+   ========================================================================= */
+
+.bm-mfaders {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px 6px;
+  background: var(--bm-panel);
+  border-radius: 10px;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.04),
+    0 2px 4px rgba(0,0,0,0.5);
+  user-select: none;
+}
+.bm-mfaders__title {
+  text-align: center;
+  font: 700 11px/1 -apple-system, "SF Pro Text", system-ui, sans-serif;
+  letter-spacing: 0.14em;
+  color: var(--bm-text);
+  text-shadow: 0 1px 0 rgba(0,0,0,0.6);
+  text-transform: uppercase;
+}
+.bm-mfaders__rails {
+  display: flex;
+  justify-content: space-between;
+  padding: 0 6px;
+  font: 700 9px/1 -apple-system, "SF Pro Text", system-ui, sans-serif;
+  letter-spacing: 0.14em;
+  color: var(--bm-text-dim);
+  text-shadow: 0 1px 0 rgba(0,0,0,0.6);
+}
+.bm-mfaders__row {
+  display: flex;
+  gap: 14px;
+  padding: 4px 6px 0;
+}
+.bm-mfader {
+  --h: 80px;
+  --w: 18px;
+  --thumb-w: 22px;
+  --thumb-h: 12px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 28px;
+  touch-action: none;
+}
+.bm-mfader__track {
+  position: relative;
+  width: var(--w);
+  height: var(--h);
+  border-radius: 4px;
+  background: linear-gradient(180deg, #050506 0%, #0a0a0b 100%);
+  box-shadow:
+    inset 0 2px 4px rgba(0,0,0,0.85),
+    inset 0 -1px 0 rgba(255,255,255,0.03);
+}
+.bm-mfader__fill {
+  --pos: 0;
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  bottom: 3px;
+  height: calc(var(--pos, 0) * (100% - 6px));
+  border-radius: 2px;
+  background: linear-gradient(180deg,
+    rgba(255,255,255,0.18) 0%,
+    rgba(255,255,255,0.08) 100%);
+  pointer-events: none;
+}
+.bm-mfader__thumb {
+  position: absolute;
+  left: 50%;
+  top: calc((1 - var(--pos, 0)) * (var(--h) - var(--thumb-h)));
+  transform: translateX(-50%);
+  width: var(--thumb-w);
+  height: var(--thumb-h);
+  cursor: grab;
+  filter: drop-shadow(0 2px 3px rgba(0,0,0,0.6));
+  transition: filter 120ms ease;
+}
+.bm-mfader__thumb:active { cursor: grabbing; }
+.bm-mfader__thumb:focus-visible { outline: none; }
+.bm-mfader__thumb:focus-visible .bm-mfader__cap {
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.6),
+    inset 0 -1px 1px rgba(0,0,0,0.5),
+    0 0 0 2px var(--bm-focus);
+}
+.bm-mfader__cap {
+  position: absolute;
+  inset: 0;
+  border-radius: 4px;
+  border: 1px solid #000;
+  background:
+    repeating-linear-gradient(90deg,
+      rgba(255,255,255,0.05) 0 1px,
+      rgba(0,0,0,0.05)        1px 2px),
+    linear-gradient(180deg,
+      #d8d8da 0%, #f4f4f6 35%, #9a9a9c 55%, #6a6a6c 80%, #2e2e30 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.7),
+    inset 0 -1px 1px rgba(0,0,0,0.5);
+}
+.bm-mfader__cap::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  top: 50%;
+  height: 1px;
+  transform: translateY(-50%);
+  background: linear-gradient(90deg,
+    transparent 0%, rgba(0,0,0,0.55) 20%, rgba(0,0,0,0.55) 80%, transparent 100%);
+}
+.bm-mfader__icon {
+  color: var(--bm-text-dim);
+  filter: drop-shadow(0 1px 0 rgba(0,0,0,0.6));
+  transition: color 120ms ease;
+  cursor: pointer;
+}
+.bm-mfader[data-muted="true"] .bm-mfader__track {
+  background-image:
+    linear-gradient(180deg, #050506 0%, #0a0a0b 100%),
+    repeating-linear-gradient(45deg,
+      transparent 0 3px,
+      rgba(255, 59, 48, 0.18) 3px 5px);
+}
+.bm-mfader[data-muted="true"] .bm-mfader__icon { color: var(--meter-red); }

@@ -88,7 +88,7 @@ describe("BlackmagicBleClient", () => {
       optionalServices: [BLACKMAGIC_CAMERA_SERVICE],
     });
     expect(state).toEqual({
-      deviceId: "device-1",
+      deviceId: "URSA Broadcast",
       deviceName: "URSA Broadcast",
       connected: true,
     });
@@ -101,6 +101,21 @@ describe("BlackmagicBleClient", () => {
     expect(status.startNotifications.mock.invocationCallOrder[0]).toBeLessThan(
       status.writeValueWithResponse.mock.invocationCallOrder[0]!,
     );
+  });
+
+  it("falls back to device.id when the camera advertises no BLE name", async () => {
+    class UnnamedDevice extends EventTarget implements BluetoothDeviceLike {
+      readonly id = "device-no-name";
+      readonly name = undefined;
+      constructor(readonly gatt: BluetoothRemoteGATTServerLike) {
+        super();
+      }
+    }
+    bluetooth.requestDevice = vi.fn(async () => new UnnamedDevice(server));
+
+    const client = new BlackmagicBleClient({ bluetooth });
+    const state = await client.connect();
+    expect(state.deviceId).toBe("device-no-name");
   });
 
   it("throws when Web Bluetooth is unavailable", async () => {
@@ -240,7 +255,7 @@ describe("BlackmagicBleClient", () => {
     const client = new BlackmagicBleClient({ bluetooth });
     const state = await client.tryRestoreConnection();
 
-    expect(state).toEqual({ deviceId: "device-1", deviceName: "URSA Broadcast", connected: true });
+    expect(state).toEqual({ deviceId: "URSA Broadcast", deviceName: "URSA Broadcast", connected: true });
     expect(bluetooth.requestDevice).not.toHaveBeenCalled();
     expect(server.connect).toHaveBeenCalledOnce();
   });
