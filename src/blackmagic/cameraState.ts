@@ -135,8 +135,22 @@ function createEmptySnapshot(): CameraSnapshot {
     audio: {},
     metadata: {},
     unitOutputs: { colorBars: false, programReturnFeed: false },
+    ndFilterStops: 0,
+    ndFilterDisplayMode: 0,
     updatedKeys: [],
   };
+}
+
+/** Full JSON export for relay `panel_sync`; strips bookkeeping keys only. */
+export function serializeCameraSnapshotForRelay(snapshot: CameraSnapshot): Record<string, unknown> {
+  try {
+    const raw = JSON.parse(JSON.stringify(snapshot)) as Record<string, unknown>;
+    delete raw.updatedKeys;
+    delete raw.lastUpdateMs;
+    return raw;
+  } catch {
+    return {};
+  }
 }
 
 export class CameraState {

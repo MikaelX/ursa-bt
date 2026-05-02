@@ -1,8 +1,7 @@
 import { BlackmagicBleClient } from "../blackmagic/bleClient";
-import { CameraState, shouldRelayPanelSyncCommand, type CameraSnapshot } from "../blackmagic/cameraState";
+import { CameraState, serializeCameraSnapshotForRelay, type CameraSnapshot } from "../blackmagic/cameraState";
 import { commands, toHex, withDestination } from "../blackmagic/protocol";
 import {
-  cameraStatusForRelayWire,
   decodeCameraStatus,
   decodeCameraStatusFromHex,
   formatCameraStatusLogLine,
@@ -202,6 +201,54 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     }, 1500);
   };
 
+  let banksRevisionCounter = 0;
+  let relayHostPanelSyncTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function clearRelayHostPanelSyncDebouncer(): void {
+    if (relayHostPanelSyncTimer !== undefined) {
+      clearTimeout(relayHostPanelSyncTimer);
+      relayHostPanelSyncTimer = undefined;
+    }
+  }
+
+  function buildRelayPanelSyncEnvelope(): Record<string, unknown> {
+    const snap = serializeCameraSnapshotForRelay(state.current);
+    snap[RELAY_LOADED_SLOT_KEY] = banks.loadedSlot;
+    snap[RELAY_SCENE_FILLED_KEY] = banks.banks.map((b) => b !== null);
+    snap[RELAY_BANKS_REVISION_KEY] = banksRevisionCounter;
+    return snap;
+  }
+
+  function scheduleRelayHostPanelSync(): void {
+    if (!relayHostBridge?.isActive) return;
+    if (relayHostPanelSyncTimer !== undefined) clearTimeout(relayHostPanelSyncTimer);
+    relayHostPanelSyncTimer = setTimeout(() => {
+      relayHostPanelSyncTimer = undefined;
+      if (!relayHostBridge?.isActive) return;
+      relayHostBridge.pushPanelSync(buildRelayPanelSyncEnvelope());
+    }, 220);
+  }
+
+  async function reloadSceneBanksFromShared(cameraId: string): Promise<void> {
+    try {
+      const next = await banksApi.load(cameraId);
+      if (cameraId !== activeDeviceId) return;
+      banks = next;
+      loadedBankSnapshot = banks.loadedSlot !== null ? banks.banks[banks.loadedSlot] ?? null : null;
+      renderBanks();
+      banksRevisionCounter += 1;
+      if (relayHostBridge?.isActive) relayHostBridge.pushPanelSync(buildRelayPanelSyncEnvelope());
+    } catch (e: unknown) {
+      log(`Relay: shared banks refresh failed: ${errorMessage(e)}`);
+    }
+  }
+
+  function notifyJoinersBanksChanged(): void {
+    if (!relayHostBridge?.isActive) return;
+    banksRevisionCounter += 1;
+    relayHostBridge.pushPanelSync(buildRelayPanelSyncEnvelope());
+  }
+
   const ingestIncomingBle = (data: DataView): void => {
     const packet = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
     const hex = toHex(packet);
@@ -224,7 +271,8 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     state.ingestStatus(status);
     relayHostBridge?.pushCameraStatus(status);
     if (relayHostBridge?.isActive) {
-      relayHostBridge.pushPanelSync({ status: cameraStatusForRelayWire(status) });
+      clearRelayHostPanelSyncDebouncer();
+      relayHostBridge.pushPanelSync(buildRelayPanelSyncEnvelope());
     }
     renderStatusFlags(root, status);
     log(formatCameraStatusLogLine(status));
@@ -244,6 +292,8 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   let lastRelayJoinSessionId: string | undefined;
   let relayJoinReconnectTimer: ReturnType<typeof setTimeout> | undefined;
   let relayJoinReconnectAttempt = 0;
+  /** Last `__relayBanksRevision` merged from bootstrap / panel_sync; avoids reloading banks each tick. */
+  let lastRelayBanksRevisionSeen: number | undefined;
   /** Mirrors the Connect "Auto-reconnect" toggle for relay join (and BLE when not joined). */
   let joinAutoReconnect = true;
   const relayJoinDropChain: { handle: () => void } = { handle: () => {} };
@@ -327,6 +377,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       onIncomingControl: onIncoming,
       onLog: (message) => log(message),
       onDisconnect: () => {
+        clearRelayHostPanelSyncDebouncer();
         relayHostBridge?.cleanup();
         relayHostBridge = undefined;
         bleLinked = false;
@@ -439,6 +490,8 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
         const rec = snap as Record<string, unknown>;
         const hints = readRelaySceneHintsFromSnap(rec);
         const clean = stripRelayPanelSideKeys(rec);
+        const br = rec[RELAY_BANKS_REVISION_KEY];
+        if (typeof br === "number") lastRelayBanksRevisionSeen = br;
         if (Object.keys(clean).length > 0) {
           state.hydrateFromRelayExport(clean);
         }
@@ -455,9 +508,11 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
           state.relayPanelSyncPatch(clean);
         }
         applyRelaySceneBankHints(hints);
-        log("Relay: panel sync (bars / display LUT, etc.)");
-        const banksRev = snap[RELAY_BANKS_REVISION_KEY];
-        if (typeof banksRev === "number" && activeDeviceId) {
+        log("Relay: panel snapshot merge");
+        const banksRevRaw = snap[RELAY_BANKS_REVISION_KEY];
+        const banksRev = typeof banksRevRaw === "number" ? banksRevRaw : undefined;
+        if (banksRev !== undefined && banksRev !== lastRelayBanksRevisionSeen && activeDeviceId) {
+          lastRelayBanksRevisionSeen = banksRev;
           void loadBanksFor(activeDeviceId, { relayJoin: true }).catch((e: unknown) => {
             log(`Relay banks refresh failed: ${errorMessage(e)}`);
           });
@@ -468,6 +523,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       },
       onDropped: () => {
         relayJoinedMode = false;
+        lastRelayBanksRevisionSeen = undefined;
         state.clearDeviceName();
         setConnection(root, "Disconnected", null);
         queueMicrotask(() => refreshControls());
@@ -493,10 +549,12 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     },
     connect: () => rawClient.connect(),
     disconnect: () => {
+      clearRelayHostPanelSyncDebouncer();
       relayHostBridge?.cleanup();
       relayHostBridge = undefined;
       if (relayJoinedMode) {
         relayJoinedMode = false;
+        lastRelayBanksRevisionSeen = undefined;
         clearRelayJoinReconnectSchedule();
         lastRelayJoinSessionId = undefined;
         clearRelayJoinRestore();
@@ -554,6 +612,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
 
     relayJoinedMode = false;
     relayJoinTransport().cleanupQuiet();
+    lastRelayBanksRevisionSeen = undefined;
 
     setConnection(root, "Negotiating relay (WebSocket handshake)…", null);
     try {
@@ -743,6 +802,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   }
 
   async function startRelayHosting(sessionName: string, deviceId: string): Promise<void> {
+    clearRelayHostPanelSyncDebouncer();
     relayHostBridge?.cleanup();
     const persistCameraId = deviceId;
     relayHostBridge = new RelayHostSession(rawClient, {
@@ -757,36 +817,27 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
         return {
           type: "bootstrap_snapshot",
           snapshot: (() => {
-            const snap = JSON.parse(JSON.stringify(state.current)) as Record<string, unknown>;
+            const snap = serializeCameraSnapshotForRelay(state.current);
             snap[RELAY_LOADED_SLOT_KEY] = banks.loadedSlot;
             snap[RELAY_SCENE_FILLED_KEY] = banks.banks.map((b) => b !== null);
+            snap[RELAY_BANKS_REVISION_KEY] = banksRevisionCounter;
             return snap;
           })(),
         };
       },
       onForwardedJoinerCommand: (bytes) => {
-        if (state.applyRelayPanelSyncFromCommandBytes(bytes)) {
-          const pl = buildPanelSyncPayload(state.current);
-          if (pl) relayHostBridge?.pushPanelSync(pl);
-        }
+        if (state.applyRelayPanelSyncFromCommandBytes(bytes)) scheduleRelayHostPanelSync();
+      },
+      onSharedSessionDirty: () => {
+        void reloadSceneBanksFromShared(persistCameraId);
       },
     });
     await relayHostBridge.connect(sessionName, deviceId);
+    relayHostBridge.pushPanelSync(buildRelayPanelSyncEnvelope());
     syncRelayHubButtons();
     void banksApi.saveLastState(deviceId, currentScene).catch((e: unknown) => {
       log(`Relay share warm persist failed: ${errorMessage(e)}`);
     });
-  }
-
-  let banksRevisionCounter = 0;
-  function notifyJoinersBanksChanged(): void {
-    if (!relayHostBridge?.isActive) return;
-    banksRevisionCounter += 1;
-    const pl = buildPanelSyncPayload(state.current) ?? {};
-    pl[RELAY_BANKS_REVISION_KEY] = banksRevisionCounter;
-    pl[RELAY_LOADED_SLOT_KEY] = banks.loadedSlot;
-    pl[RELAY_SCENE_FILLED_KEY] = banks.banks.map((b) => b !== null);
-    relayHostBridge.pushPanelSync(pl);
   }
 
   async function presentRelayHostShareModal(deviceId: string): Promise<void> {
@@ -885,6 +936,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       const deviceId = activeDeviceId;
       relayHostBridge?.stopSharing();
       relayHostBridge = undefined;
+      clearRelayHostPanelSyncDebouncer();
       if (deviceId) {
         const prefs = readRelayPrefs(deviceId);
         if (prefs?.sessionName) {
@@ -945,6 +997,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       renderBanks();
     }
     scheduleLastStateSave();
+    if (relayHostBridge?.isActive) scheduleRelayHostPanelSync();
   });
 
   bind(root, "[data-connect-toggle]", "click", async () => {
@@ -1129,10 +1182,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     if (isUrsaCameraName(state.current.deviceName)) {
       state.applyNdFilterStopsWrite(next);
       log(`ND ${formatNd(next)} (manual on camera — not sent over Bluetooth)`);
-      if (relayHostBridge?.isActive) {
-        const pl = buildPanelSyncPayload(state.current);
-        if (pl) relayHostBridge.pushPanelSync(pl);
-      }
+      if (relayHostBridge?.isActive) scheduleRelayHostPanelSync();
       return;
     }
     const mode = state.current.ndFilterDisplayMode ?? 0;
@@ -1213,10 +1263,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       setOutgoingDestination(id);
       state.applyMetadataWrite({ cameraId: String(id) });
       await sendCommand(log, `Camera ${id} (dest + slate ID)`, commands.metadataCameraId(String(id)));
-      if (relayHostBridge?.isActive) {
-        const pl = buildPanelSyncPayload(state.current);
-        if (pl) relayHostBridge.pushPanelSync(pl);
-      }
+      if (relayHostBridge?.isActive) scheduleRelayHostPanelSync();
     });
   });
 
@@ -1249,6 +1296,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
           renderBanks();
           log(`Stored current settings to bank ${slot + 1}`);
           notifyJoinersBanksChanged();
+          if (relayJoinedMode) relayJoinTransport().notifySharedSessionDirty();
         } catch (error) {
           log(`Bank store failed: ${errorMessage(error)}`);
         }
@@ -1275,6 +1323,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
         renderBanks();
         log(`Loaded bank ${slot + 1}`);
         notifyJoinersBanksChanged();
+        if (relayJoinedMode) relayJoinTransport().notifySharedSessionDirty();
       } catch (error) {
         log(`Bank load failed: ${errorMessage(error)}`);
       }
@@ -1310,10 +1359,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     packet: Uint8Array,
   ): Promise<void> {
     const ok = await runAction(logger, label, () => client.writeCommand(packet), packet);
-    if (ok && relayHostBridge?.isActive && shouldRelayPanelSyncCommand(packet)) {
-      const pl = buildPanelSyncPayload(state.current);
-      if (pl) relayHostBridge.pushPanelSync(pl);
-    }
+    if (ok && relayHostBridge?.isActive) scheduleRelayHostPanelSync();
   }
 
   bind(root, "[data-record-start]", "click", async () => {
@@ -2613,40 +2659,6 @@ function groupLabel(group: PaintGroup): string {
 function bind(root: HTMLElement, selector: string, eventName: string, handler: (event: Event) => void): void {
   const elements = root.querySelectorAll<HTMLElement>(selector);
   elements.forEach((element) => element.addEventListener(eventName, handler));
-}
-
-function buildPanelSyncPayload(snapshot: CameraSnapshot): Record<string, unknown> | null {
-  const out: Record<string, unknown> = {};
-  out.unitOutputs = {
-    colorBars: snapshot.unitOutputs?.colorBars === true,
-    programReturnFeed: snapshot.unitOutputs?.programReturnFeed === true,
-  };
-  if (snapshot.displayLut) out.displayLut = snapshot.displayLut;
-  if (snapshot.cameraNumber !== undefined) out.cameraNumber = snapshot.cameraNumber;
-  if (snapshot.metadata && Object.keys(snapshot.metadata).length > 0) {
-    out.metadata = { ...snapshot.metadata };
-  }
-  const colorOut: Record<string, unknown> = {
-    lift: { ...snapshot.color.lift },
-    gamma: { ...snapshot.color.gamma },
-    gain: { ...snapshot.color.gain },
-    offset: { ...snapshot.color.offset },
-  };
-  if (snapshot.color.contrast) colorOut.contrast = { ...snapshot.color.contrast };
-  if (snapshot.color.lumaMix !== undefined) colorOut.lumaMix = snapshot.color.lumaMix;
-  if (snapshot.color.hue !== undefined) colorOut.hue = snapshot.color.hue;
-  if (snapshot.color.saturation !== undefined) colorOut.saturation = snapshot.color.saturation;
-  out.color = colorOut;
-  if (snapshot.status) out.status = cameraStatusForRelayWire(snapshot.status);
-  if (typeof snapshot.autoWhiteBalanceActive === "boolean") {
-    out.autoWhiteBalanceActive = snapshot.autoWhiteBalanceActive;
-  }
-  if (snapshot.gainDb !== undefined) out.gainDb = snapshot.gainDb;
-  if (snapshot.iso !== undefined) out.iso = snapshot.iso;
-  if (snapshot.ndFilterStops !== undefined) out.ndFilterStops = snapshot.ndFilterStops;
-  if (snapshot.ndFilterDisplayMode !== undefined) out.ndFilterDisplayMode = snapshot.ndFilterDisplayMode;
-  if (snapshot.deviceName) out.deviceName = snapshot.deviceName;
-  return Object.keys(out).length > 0 ? out : null;
 }
 
 async function runAction(

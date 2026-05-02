@@ -37,6 +37,8 @@ export class RelayHostSession {
       } | null>;
       /** After a joiner's forward_cmd is written to BLE — bytes for host-side state mirror + panel_sync. */
       onForwardedJoinerCommand?: (bytes: Uint8Array) => void;
+      /** Another client persisted banks/scenes to shared storage — refresh metadata from API. */
+      onSharedSessionDirty?: () => void;
     },
   ) {}
 
@@ -192,6 +194,11 @@ export class RelayHostSession {
       }
       if (t === "host_pair") {
         await this.ble.triggerPairing();
+        return;
+      }
+      if (t === "shared_session_dirty") {
+        this.params.onSharedSessionDirty?.();
+        return;
       }
     } catch (e) {
       this.params.log(`Relay host action failed: ${(e as Error).message}`);

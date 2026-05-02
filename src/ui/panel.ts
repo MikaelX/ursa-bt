@@ -1701,7 +1701,7 @@ function formatIso(iso: number | undefined): string {
 }
 
 export function formatNd(stops: number | undefined): string {
-  if (stops === undefined || Number.isNaN(stops)) return "--";
+  if (stops === undefined || Number.isNaN(stops)) return "CLR";
   for (const p of ND_URSA_STEPS) {
     if (Math.abs(stops - p.stops) <= ND_URSA_TOL) return p.label;
   }

@@ -401,7 +401,7 @@ describe("createApp", () => {
   });
 
   it("formatNd uses URSA dial labels CLR 2 3 4 and one decimal off-ladder", () => {
-    expect(formatNd(undefined)).toBe("--");
+    expect(formatNd(undefined)).toBe("CLR");
     expect(formatNd(0)).toBe("CLR");
     expect(formatNd(1)).toBe("2");
     expect(formatNd(2)).toBe("3");

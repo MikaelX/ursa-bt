@@ -7,7 +7,8 @@ type JoinWire =
   | { type: "joined"; sessionName: string; deviceId: string }
   | { type: "forward_cmd"; hex: string }
   | { type: "host_power"; on: boolean }
-  | { type: "host_pair" };
+  | { type: "host_pair" }
+  | { type: "shared_session_dirty" };
 
 function hexEncode(bytes: Uint8Array): string {
   return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -191,6 +192,16 @@ export class RelayJoinedCameraClient implements CameraClient {
   async setPower(on: boolean): Promise<void> {
     if (!this.sock || this.sock.readyState !== WebSocket.OPEN) throw new Error("Relay not connected");
     this.sock.send(JSON.stringify({ type: "host_power", on } satisfies JoinWire));
+  }
+
+  /** Tell the BLE host another client wrote banks/load state to `/api/cameras/:id/banks`. */
+  notifySharedSessionDirty(): void {
+    if (!this.sock || this.sock.readyState !== WebSocket.OPEN) return;
+    try {
+      this.sock.send(JSON.stringify({ type: "shared_session_dirty" } satisfies JoinWire));
+    } catch {
+      /* ignore */
+    }
   }
 
   cleanup(): void {

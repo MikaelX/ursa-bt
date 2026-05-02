@@ -28,6 +28,8 @@ export type RelayWireMessage =
   | { type: "session_ended" }
   | { type: "host_power"; on: boolean }
   | { type: "host_pair" }
+  /** Join-only: host should refresh banks/session data from shared API (`/banks`). */
+  | { type: "shared_session_dirty" }
   | { type: "request_bootstrap" }
   | { type: "bootstrap_snapshot"; snapshot: Record<string, unknown> }
   | { type: "panel_sync"; snapshot: Record<string, unknown> };
@@ -291,7 +293,8 @@ export class RelayCoordinator {
 
         case "forward_cmd":
         case "host_power":
-        case "host_pair": {
+        case "host_pair":
+        case "shared_session_dirty": {
           const id = this.findSessionForSocket(ws);
           if (!id) return;
           const room = this.rooms.get(id);
