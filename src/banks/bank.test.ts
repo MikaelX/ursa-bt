@@ -82,6 +82,9 @@ describe("applyBankToCamera", () => {
     expect(bank.color.contrast?.adjust).toBeCloseTo(1.2);
     expect(bank.color.hue).toBeCloseTo(0.05);
     expect(bank.color.saturation).toBeCloseTo(1.1);
+    expect(bank.ndFilterStops).toBe(0);
+    expect(bank.ndFilterDisplayMode).toBe(0);
+    expect(bank.unitOutputs).toEqual({ colorBars: false, programReturnFeed: false });
   });
 
   it("buildBankFromSnapshot captures audio settings, cameraNumber and ND filter", () => {
@@ -143,6 +146,30 @@ describe("applyBankToCamera", () => {
     expect(decoded.find((d) => d.category === 2 && d.parameter === 4)?.values).toEqual([1]);
     expect(decoded.find((d) => d.category === 2 && d.parameter === 5)?.values).toHaveLength(2);
     expect(decoded.find((d) => d.category === 1 && d.parameter === 16)?.values).toHaveLength(2);
+  });
+
+  it("applyBankToCamera sends color bars and program return when unitOutputs is saved on the bank", async () => {
+    const bank: Bank = {
+      color: {
+        lift: { red: 0, green: 0, blue: 0, luma: 0 },
+        gamma: { red: 0, green: 0, blue: 0, luma: 0 },
+        gain: { red: 1, green: 1, blue: 1, luma: 1 },
+        offset: { red: 0, green: 0, blue: 0, luma: 0 },
+      },
+      unitOutputs: { colorBars: true, programReturnFeed: false },
+    };
+
+    const writeCommand = vi.fn(async (_packet: Uint8Array) => undefined);
+    await applyBankToCamera({ writeCommand }, bank);
+
+    const payloads = writeCommand.mock.calls.map((args) => args[0]);
+    const decoded = payloads
+      .map((packet) => decodeConfigurationPacket(packet))
+      .filter((d): d is NonNullable<typeof d> => d !== undefined);
+
+    const bars = decoded.find((d) => d.category === 4 && d.parameter === 4);
+    expect(bars?.values?.[0]).toBeGreaterThan(0);
+    expect(decoded.find((d) => d.category === 4 && d.parameter === 6)?.values?.[0]).toBe(0);
   });
 
   it("matches commands.* output exactly when the bank holds the same value", async () => {

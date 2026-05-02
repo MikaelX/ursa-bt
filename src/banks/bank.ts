@@ -40,6 +40,8 @@ export interface Bank {
   exposureUs?: number;
   tallyBrightness?: { master?: number; front?: number; rear?: number };
   metadataCameraId?: string;
+  /** Persisted booleans toggle display category 4.4 / 4.6; replay uses same on-duration as the panel tap (30). */
+  unitOutputs?: { colorBars: boolean; programReturnFeed: boolean };
 }
 
 export interface BanksFile {
@@ -95,14 +97,18 @@ export function buildBankFromSnapshot(snapshot: CameraSnapshot): Bank {
             phantomPower: snapshot.audio.phantomPower,
           }
         : undefined,
-    ndFilterStops: snapshot.ndFilterStops,
-    ndFilterDisplayMode: snapshot.ndFilterDisplayMode,
     dynamicRange: snapshot.dynamicRange,
     sharpeningLevel: snapshot.sharpeningLevel,
     displayLut: snapshot.displayLut ? { ...snapshot.displayLut } : undefined,
     exposureUs: snapshot.exposureUs,
     tallyBrightness: snapshot.tally?.brightness ? { ...snapshot.tally.brightness } : undefined,
     metadataCameraId: snapshot.metadata.cameraId,
+    ndFilterStops: snapshot.ndFilterStops ?? 0,
+    ndFilterDisplayMode: snapshot.ndFilterDisplayMode ?? 0,
+    unitOutputs: {
+      colorBars: snapshot.unitOutputs?.colorBars ?? false,
+      programReturnFeed: snapshot.unitOutputs?.programReturnFeed ?? false,
+    },
   };
 }
 
@@ -182,13 +188,21 @@ export async function applyBankToCamera(
     if (a.phantomPower !== undefined) await send(commands.phantomPower(a.phantomPower));
   }
 
-  if (!options?.skipNdBle && bank.ndFilterStops !== undefined) {
-    await send(commands.ndFilterStops(bank.ndFilterStops, bank.ndFilterDisplayMode ?? 0));
+  if (!options?.skipNdBle && (bank.ndFilterStops !== undefined || bank.ndFilterDisplayMode !== undefined)) {
+    await send(commands.ndFilterStops(bank.ndFilterStops ?? 0, bank.ndFilterDisplayMode ?? 0));
   }
 
   if (bank.dynamicRange !== undefined) await send(commands.dynamicRange(bank.dynamicRange));
   if (bank.sharpeningLevel !== undefined) await send(commands.sharpening(bank.sharpeningLevel));
   if (bank.displayLut) await send(commands.displayLut(bank.displayLut.selected, bank.displayLut.enabled));
+
+  /** Match panel tap durations in `bindColorBars` / `bindProgramReturnFeed` (seconds). */
+  const UNIT_OUTPUT_ON_SEC = 30;
+  if (bank.unitOutputs !== undefined) {
+    await send(commands.colorBars(bank.unitOutputs.colorBars ? UNIT_OUTPUT_ON_SEC : 0));
+    await send(commands.programReturnFeed(bank.unitOutputs.programReturnFeed ? UNIT_OUTPUT_ON_SEC : 0));
+  }
+
   if (bank.exposureUs !== undefined) await send(commands.exposureUs(bank.exposureUs));
 
   if (bank.tallyBrightness) {
