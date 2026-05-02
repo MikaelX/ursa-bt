@@ -1,11 +1,29 @@
 import { decodeConfigurationPacket, type DecodedConfigurationPacket } from "./protocol";
 import type { CameraStatus } from "./status";
 
+/** URSA ND is not reported reliably over Bluetooth; ignore incoming ND fields from the camera only. */
+function snapshotDeviceIsUrsaForBleNd(name: string | undefined): boolean {
+  if (!name?.trim()) return false;
+  return name.toUpperCase().includes("URSA");
+}
+
 function isRelayPanelSyncDecoded(packet: DecodedConfigurationPacket): boolean {
-  return (
-    (packet.category === 4 && (packet.parameter === 4 || packet.parameter === 6)) ||
-    (packet.category === 1 && packet.parameter === 15)
-  );
+  if (packet.category === 4 && (packet.parameter === 4 || packet.parameter === 6)) return true;
+  if (
+    packet.category === 1 &&
+    (packet.parameter === 3 ||
+      packet.parameter === 4 ||
+      packet.parameter === 13 ||
+      packet.parameter === 14 ||
+      packet.parameter === 15 ||
+      packet.parameter === 16 ||
+      packet.parameter === 17)
+  ) {
+    return true;
+  }
+  // Color correction (lift / gamma / gain / offset / contrast / luma mix / hue+sat)
+  if (packet.category === 8 && packet.parameter >= 0 && packet.parameter <= 6) return true;
+  return false;
 }
 
 export interface LiftGainGamma {
@@ -68,6 +86,11 @@ export interface CameraSnapshot {
   displayLut?: { selected: number; enabled: boolean };
   /** Display outputs toggled locally or via relay; not always echoed on BLE incoming. */
   unitOutputs?: { colorBars: boolean; programReturnFeed: boolean };
+  /**
+   * Chassis / video UI: "auto WB" one-shot armed (Set auto WB); not a separate BLE status byte.
+   * Cleared on Restore auto WB, manual WB/tint steps, or when the camera reports WB (param 2).
+   */
+  autoWhiteBalanceActive?: boolean;
   exposureUs?: number;
   tally?: {
     programMe: boolean;
@@ -106,7 +129,7 @@ function createEmptySnapshot(): CameraSnapshot {
     color: {
       lift: EMPTY_LGG(),
       gamma: EMPTY_LGG(),
-      gain: { red: 1, green: 1, blue: 1, luma: 1 },
+      gain: { red: 0, green: 0, blue: 0, luma: 0 },
       offset: EMPTY_LGG(),
     },
     audio: {},
@@ -157,6 +180,12 @@ export class CameraState {
     });
   }
 
+  clearDeviceName(): void {
+    this.update(["deviceName"], (draft) => {
+      delete draft.deviceName;
+    });
+  }
+
   ingestStatus(status: CameraStatus): void {
     this.update(["status"], (draft) => {
       draft.status = status;
@@ -171,13 +200,20 @@ export class CameraState {
       return { decoded: undefined, changedKeys: [] };
     }
 
-    const changedKeys = applyDecoded(this.snapshot, decoded);
+    const changedKeys = applyDecoded(this.snapshot, decoded, "ble-incoming");
 
     if (changedKeys.length > 0) {
       this.emit(changedKeys);
     }
 
     return { decoded, changedKeys };
+  }
+
+  /** Optimistic ND stops (e.g. URSA mechanical wheel — UI / banks / relay only). */
+  applyNdFilterStopsWrite(stops: number): void {
+    this.update(["ndFilterStops"], (draft) => {
+      draft.ndFilterStops = stops;
+    });
   }
 
   setRecording(recording: boolean): void {
@@ -189,6 +225,27 @@ export class CameraState {
   setCameraNumber(cameraNumber: number): void {
     this.update(["cameraNumber"], (draft) => {
       draft.cameraNumber = cameraNumber;
+    });
+  }
+
+  /** Optimistic master gain (dB); camera may not echo every write over BLE. */
+  applyGainDbWrite(gainDb: number): void {
+    this.update(["gainDb"], (draft) => {
+      draft.gainDb = gainDb;
+    });
+  }
+
+  /** Optimistic ISO; camera may not echo every write over BLE. */
+  applyIsoWrite(iso: number): void {
+    this.update(["iso"], (draft) => {
+      draft.iso = iso;
+    });
+  }
+
+  /** Mirrors the auto-WB toggle LED (Set / Restore auto WB); host + joiners stay aligned over relay. */
+  setAutoWhiteBalanceActive(active: boolean): void {
+    this.update(["autoWhiteBalanceActive"], (draft) => {
+      draft.autoWhiteBalanceActive = active;
     });
   }
 
@@ -233,7 +290,7 @@ export class CameraState {
       draft.color = {
         lift: EMPTY_LGG(),
         gamma: EMPTY_LGG(),
-        gain: { red: 1, green: 1, blue: 1, luma: 1 },
+        gain: { red: 0, green: 0, blue: 0, luma: 0 },
         offset: EMPTY_LGG(),
         contrast: { pivot: 0.5, adjust: 1 },
         lumaMix: 1,
@@ -275,19 +332,19 @@ export class CameraState {
   }
 
   /**
-   * Apply command bytes that affect panel-only state (bars, PGM return, display LUT)
-   * so the host can mirror joiner writes before broadcasting.
+   * Apply command bytes that affect shared panel state (bars, LUT, color, etc.)
+   * so the host can mirror joiner writes before broadcasting `panel_sync`.
    */
   applyRelayPanelSyncFromCommandBytes(bytes: Uint8Array): boolean {
     const decoded = decodeConfigurationPacket(bytes);
     if (!decoded || !isRelayPanelSyncDecoded(decoded)) return false;
-    const keys = applyDecoded(this.snapshot, decoded);
+    const keys = applyDecoded(this.snapshot, decoded, "relay-command");
     if (keys.length === 0) return false;
     this.emit(keys);
     return true;
   }
 
-  /** Merge a partial snapshot from the host (bars / LUT, etc.). */
+  /** Merge a partial snapshot from the host (bars, LUT, color, camera id, …). */
   relayPanelSyncPatch(partial: Record<string, unknown>): void {
     if (!partial || typeof partial !== "object") return;
     let raw: Partial<CameraSnapshot>;
@@ -334,6 +391,7 @@ export function shouldRelayPanelSyncCommand(packet: Uint8Array): boolean {
 function applyDecoded(
   snapshot: CameraSnapshot,
   packet: DecodedConfigurationPacket,
+  source: "ble-incoming" | "relay-command",
 ): string[] {
   const changed: string[] = [];
   const [v0 = 0, v1 = 0, v2 = 0, v3 = 0, v4 = 0] = packet.values;
@@ -371,7 +429,16 @@ function applyDecoded(
       switch (packet.parameter) {
         case 2:
           snapshot.whiteBalance = { temperature: v0, tint: v1 };
+          snapshot.autoWhiteBalanceActive = false;
           mark("whiteBalance");
+          break;
+        case 3:
+          snapshot.autoWhiteBalanceActive = true;
+          mark("autoWhiteBalanceActive");
+          break;
+        case 4:
+          snapshot.autoWhiteBalanceActive = false;
+          mark("autoWhiteBalanceActive");
           break;
         case 5:
           snapshot.exposureUs = v0;
@@ -414,14 +481,27 @@ function applyDecoded(
           snapshot.iso = v0;
           mark("iso");
           break;
-        case 16:
+        case 16: {
+          if (source === "ble-incoming" && snapshotDeviceIsUrsaForBleNd(snapshot.deviceName)) {
+            break;
+          }
           snapshot.ndFilterStops = v0;
           mark("ndFilterStops");
+          if (packet.values.length >= 2) {
+            const mode = Math.round(packet.values[1] ?? 0);
+            snapshot.ndFilterDisplayMode = Math.min(2, Math.max(0, mode));
+            mark("ndFilterDisplayMode");
+          }
           break;
-        case 17:
-          snapshot.ndFilterDisplayMode = v0;
+        }
+        case 17: {
+          if (source === "ble-incoming" && snapshotDeviceIsUrsaForBleNd(snapshot.deviceName)) {
+            break;
+          }
+          snapshot.ndFilterDisplayMode = Math.round(v0);
           mark("ndFilterDisplayMode");
           break;
+        }
       }
       break;
     case 2: // Audio
@@ -631,6 +711,16 @@ function relayMergeImportedSnapshot(base: CameraSnapshot, p: Partial<CameraSnaps
       p.whiteBalance !== undefined
         ? { ...(base.whiteBalance ?? { temperature: 0, tint: 0 }), ...p.whiteBalance }
         : base.whiteBalance,
+    autoWhiteBalanceActive:
+      typeof p.autoWhiteBalanceActive === "boolean"
+        ? p.autoWhiteBalanceActive
+        : base.autoWhiteBalanceActive,
+    gainDb: typeof p.gainDb === "number" ? p.gainDb : base.gainDb,
+    iso: typeof p.iso === "number" ? p.iso : base.iso,
+    ndFilterStops: typeof p.ndFilterStops === "number" ? p.ndFilterStops : base.ndFilterStops,
+    ndFilterDisplayMode:
+      typeof p.ndFilterDisplayMode === "number" ? p.ndFilterDisplayMode : base.ndFilterDisplayMode,
+    deviceName: typeof p.deviceName === "string" && p.deviceName.length > 0 ? p.deviceName : base.deviceName,
   };
 
   next.updatedKeys = ["relay-bootstrap"];

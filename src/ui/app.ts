@@ -2,6 +2,7 @@ import { BlackmagicBleClient } from "../blackmagic/bleClient";
 import { CameraState, shouldRelayPanelSyncCommand, type CameraSnapshot } from "../blackmagic/cameraState";
 import { commands, toHex, withDestination } from "../blackmagic/protocol";
 import {
+  cameraStatusForRelayWire,
   decodeCameraStatus,
   decodeCameraStatusFromHex,
   formatCameraStatusLogLine,
@@ -12,6 +13,7 @@ import { RelayHostSession } from "../relay/relayHostSession";
 import { getRelaySessionsUrl, getRelaySocketUrl } from "../relay/relayUrl";
 import {
   MASTER_BLACK_RANGE,
+  MASTER_GAIN_RANGE,
   PAINT_CHANNELS,
   PAINT_GROUPS,
   PAINT_RANGE,
@@ -37,6 +39,10 @@ import {
   writePaintSegReadout,
   valueToCenteredNorm,
   centeredNormToValue,
+  formatNd,
+  updateAppHeaderCameraProduct,
+  stepNdUrsa,
+  isUrsaCameraName,
   type PaintChannel,
   type PaintGroup,
   type ViewId,
@@ -46,6 +52,37 @@ import { HttpBanksApi, NullBanksApi, type BanksApi } from "../banks/banksClient"
 import type { CameraClient } from "./cameraClientTypes";
 
 export type { CameraClient } from "./cameraClientTypes";
+
+/** Side-channel keys in relay `panel_sync` / bootstrap — not part of {@link CameraSnapshot}. */
+const RELAY_BANKS_REVISION_KEY = "__relayBanksRevision";
+const RELAY_LOADED_SLOT_KEY = "__relayLoadedSlot";
+const RELAY_SCENE_FILLED_KEY = "__relaySceneFilledSlots";
+
+const RELAY_PANEL_SYNC_SIDE_KEYS = [RELAY_BANKS_REVISION_KEY, RELAY_LOADED_SLOT_KEY, RELAY_SCENE_FILLED_KEY] as const;
+
+function stripRelayPanelSideKeys(snap: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...snap };
+  for (const k of RELAY_PANEL_SYNC_SIDE_KEYS) delete out[k];
+  return out;
+}
+
+function readRelaySceneHintsFromSnap(snap: Record<string, unknown>): {
+  loadedSlot: number | null | undefined;
+  filledSlots: boolean[] | undefined;
+} {
+  let loadedSlot: number | null | undefined;
+  if (RELAY_LOADED_SLOT_KEY in snap) {
+    const v = snap[RELAY_LOADED_SLOT_KEY];
+    if (v === null) loadedSlot = null;
+    else if (typeof v === "number" && Number.isInteger(v) && v >= 0 && v < BANK_COUNT) loadedSlot = v;
+  }
+  const f = snap[RELAY_SCENE_FILLED_KEY];
+  let filledSlots: boolean[] | undefined;
+  if (Array.isArray(f) && f.length === BANK_COUNT && f.every((x) => x === true || x === false)) {
+    filledSlots = f as boolean[];
+  }
+  return { loadedSlot, filledSlots };
+}
 
 export interface AppOptions {
   client?: CameraClient;
@@ -94,6 +131,18 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       dirty: isDirty(),
     });
   };
+
+  function applyRelaySceneBankHints(hints: ReturnType<typeof readRelaySceneHintsFromSnap>): void {
+    if (hints.loadedSlot === undefined && hints.filledSlots === undefined) return;
+    const nextLoaded = hints.loadedSlot !== undefined ? hints.loadedSlot : banks.loadedSlot;
+    const nextBankSlots =
+      hints.filledSlots !== undefined
+        ? banks.banks.map((b, i) => (hints.filledSlots![i] ? b : null))
+        : banks.banks;
+    banks = { ...banks, loadedSlot: nextLoaded, banks: nextBankSlots };
+    loadedBankSnapshot = banks.loadedSlot !== null ? banks.banks[banks.loadedSlot] ?? null : null;
+    renderBanks();
+  }
 
   const setStoreArmed = (armed: boolean): void => {
     storeArmed = armed;
@@ -174,6 +223,9 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   const onStatus = (status: CameraStatus): void => {
     state.ingestStatus(status);
     relayHostBridge?.pushCameraStatus(status);
+    if (relayHostBridge?.isActive) {
+      relayHostBridge.pushPanelSync({ status: cameraStatusForRelayWire(status) });
+    }
     renderStatusFlags(root, status);
     log(formatCameraStatusLogLine(status));
   };
@@ -278,7 +330,8 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
         relayHostBridge?.cleanup();
         relayHostBridge = undefined;
         bleLinked = false;
-        setConnection(root, "Disconnected");
+        state.clearDeviceName();
+        setConnection(root, "Disconnected", null);
         queueMicrotask(() => refreshControls());
         syncRelayHubButtons();
         log("Disconnected");
@@ -291,7 +344,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       },
       onReconnectSucceeded: (info) => {
         state.setDeviceName(info.deviceName);
-        setConnection(root, `Connected to ${info.deviceName}`);
+        setConnection(root, "", info.deviceName);
         bleLinked = true;
         queueMicrotask(() => refreshControls());
         void loadBanksFor(info.deviceId);
@@ -383,13 +436,25 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
         ingestIncomingBle(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength));
       },
       onRelayBootstrapSnapshot: (snap) => {
-        state.hydrateFromRelayExport(snap);
+        const rec = snap as Record<string, unknown>;
+        const hints = readRelaySceneHintsFromSnap(rec);
+        const clean = stripRelayPanelSideKeys(rec);
+        if (Object.keys(clean).length > 0) {
+          state.hydrateFromRelayExport(clean);
+        }
+        applyRelaySceneBankHints(hints);
         const st = state.current.status;
         if (st) renderStatusFlags(root, st);
         log("Relay: full panel snapshot applied from host");
       },
       onRelayPanelSync: (snap) => {
-        state.relayPanelSyncPatch(snap);
+        const rec = snap as Record<string, unknown>;
+        const hints = readRelaySceneHintsFromSnap(rec);
+        const clean = stripRelayPanelSideKeys(rec);
+        if (Object.keys(clean).length > 0) {
+          state.relayPanelSyncPatch(clean);
+        }
+        applyRelaySceneBankHints(hints);
         log("Relay: panel sync (bars / display LUT, etc.)");
         const banksRev = snap[RELAY_BANKS_REVISION_KEY];
         if (typeof banksRev === "number" && activeDeviceId) {
@@ -398,12 +463,13 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
           });
         }
       },
-      onJoinedInfo: (_deviceId, sessionName) => {
-        state.setDeviceName(sessionName);
+      onJoinedInfo: (deviceId, sessionName) => {
+        log(`Relay joined: ${sessionName} (${deviceId})`);
       },
       onDropped: () => {
         relayJoinedMode = false;
-        setConnection(root, "Disconnected");
+        state.clearDeviceName();
+        setConnection(root, "Disconnected", null);
         queueMicrotask(() => refreshControls());
         syncRelayHubButtons();
         relayJoinDropChain.handle();
@@ -439,7 +505,8 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       }
       rawClient.disconnect();
       bleLinked = false;
-      setConnection(root, "Disconnected");
+      state.clearDeviceName();
+      setConnection(root, "Disconnected", null);
       queueMicrotask(() => refreshControls());
       syncRelayHubButtons();
     },
@@ -488,13 +555,13 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     relayJoinedMode = false;
     relayJoinTransport().cleanupQuiet();
 
-    setConnection(root, "Negotiating relay (WebSocket handshake)…");
+    setConnection(root, "Negotiating relay (WebSocket handshake)…", null);
     try {
       const info = await relayJoinTransport().joinSession(sessionId);
       relayJoinedMode = true;
       relayJoinReconnectAttempt = 0;
       writeRelayJoinRestore({ sessionId, autoReconnect: joinAutoReconnect });
-      setConnection(root, `Joined: ${info.deviceName}`);
+      setConnection(root, "Relay", null);
       await loadBanksFor(info.deviceId, { relayJoin: true });
       bleLinked = false;
       refreshControls();
@@ -503,7 +570,8 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     } catch (e) {
       relayJoinedMode = false;
       relayJoinTransport().cleanup();
-      setConnection(root, "Disconnected");
+      state.clearDeviceName();
+      setConnection(root, "Disconnected", null);
       log(`Relay join failed: ${errorMessage(e)}`);
       refreshControls();
       if (joinAutoReconnect && lastRelayJoinSessionId) scheduleRelayJoinReconnect();
@@ -688,7 +756,12 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
         }
         return {
           type: "bootstrap_snapshot",
-          snapshot: JSON.parse(JSON.stringify(state.current)) as Record<string, unknown>,
+          snapshot: (() => {
+            const snap = JSON.parse(JSON.stringify(state.current)) as Record<string, unknown>;
+            snap[RELAY_LOADED_SLOT_KEY] = banks.loadedSlot;
+            snap[RELAY_SCENE_FILLED_KEY] = banks.banks.map((b) => b !== null);
+            return snap;
+          })(),
         };
       },
       onForwardedJoinerCommand: (bytes) => {
@@ -711,6 +784,8 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     banksRevisionCounter += 1;
     const pl = buildPanelSyncPayload(state.current) ?? {};
     pl[RELAY_BANKS_REVISION_KEY] = banksRevisionCounter;
+    pl[RELAY_LOADED_SLOT_KEY] = banks.loadedSlot;
+    pl[RELAY_SCENE_FILLED_KEY] = banks.banks.map((b) => b !== null);
     relayHostBridge.pushPanelSync(pl);
   }
 
@@ -888,10 +963,10 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       clearRelayJoinReconnectSchedule();
       lastRelayJoinSessionId = undefined;
       clearRelayJoinRestore();
-      setConnection(root, "Connecting...");
+      setConnection(root, "Connecting...", null);
       const info = await client.connect();
       state.setDeviceName(info.deviceName);
-      setConnection(root, `Connected to ${info.deviceName}`);
+      setConnection(root, "", info.deviceName);
       bleLinked = true;
       refreshControls();
       void loadBanksFor(info.deviceId);
@@ -899,7 +974,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       void maybeOfferRelayHosting(info.deviceId);
       viewController.onConnected();
     } catch (error) {
-      setConnection(root, "Connection failed");
+      setConnection(root, "Connection failed", null);
       log(errorMessage(error));
     }
   });
@@ -1019,11 +1094,13 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
 
   bindStepper(root, "gain", async (direction) => {
     const next = stepGainDb(state.current.gainDb ?? 0, direction);
+    state.applyGainDbWrite(next);
     await sendCommand(log, `Gain ${next > 0 ? "+" : ""}${next}dB`, commands.gain(next));
   });
 
   bindStepper(root, "iso", async (direction) => {
     const next = stepIso(state.current.iso ?? 400, direction);
+    state.applyIsoWrite(next);
     await sendCommand(log, `ISO ${next}`, commands.iso(next));
   });
 
@@ -1036,21 +1113,30 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   bindStepper(root, "wb", async (direction) => {
     const current = state.current.whiteBalance ?? { temperature: 5600, tint: 0 };
     const next = stepWhiteBalance(current.temperature, direction);
-    setAutoWbActive(root, false);
+    state.setAutoWhiteBalanceActive(false);
     await sendCommand(log, `White balance ${next}K`, commands.whiteBalance(next, current.tint));
   });
 
   bindStepper(root, "tint", async (direction) => {
     const current = state.current.whiteBalance ?? { temperature: 5600, tint: 0 };
     const next = stepTint(current.tint, direction);
-    setAutoWbActive(root, false);
+    state.setAutoWhiteBalanceActive(false);
     await sendCommand(log, `Tint ${next > 0 ? "+" : ""}${next}`, commands.whiteBalance(current.temperature, next));
   });
 
   bindStepper(root, "nd", async (direction) => {
-    const current = state.current.ndFilterStops ?? 0;
-    const next = stepNdStops(current, direction);
-    await sendCommand(log, `ND ${next.toFixed(1)} stops`, commands.ndFilterStops(next));
+    const next = stepNdUrsa(state.current.ndFilterStops, direction);
+    if (isUrsaCameraName(state.current.deviceName)) {
+      state.applyNdFilterStopsWrite(next);
+      log(`ND ${formatNd(next)} (manual on camera — not sent over Bluetooth)`);
+      if (relayHostBridge?.isActive) {
+        const pl = buildPanelSyncPayload(state.current);
+        if (pl) relayHostBridge.pushPanelSync(pl);
+      }
+      return;
+    }
+    const mode = state.current.ndFilterDisplayMode ?? 0;
+    await sendCommand(log, `ND ${formatNd(next)}`, commands.ndFilterStops(next, mode));
   });
 
   bind(root, "[data-panel-active]", "click", () => {
@@ -1176,7 +1262,9 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       }
 
       try {
-        await applyBankToCamera(client, bank);
+        await applyBankToCamera(client, bank, {
+          skipNdBle: isUrsaCameraName(state.current.deviceName),
+        });
         if (activeDeviceId) {
           banks = await banksApi.setLoadedSlot(activeDeviceId, slot);
         } else {
@@ -1194,24 +1282,24 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   });
 
   if (client.tryRestoreConnection) {
-    setConnection(root, "Looking for previously paired camera…");
+    setConnection(root, "Looking for previously paired camera…", null);
     void client
       .tryRestoreConnection()
       .then((info) => {
         if (info) {
           state.setDeviceName(info.deviceName);
-          setConnection(root, `Connected to ${info.deviceName}`);
+          setConnection(root, "", info.deviceName);
           bleLinked = true;
           refreshControls();
           void loadBanksFor(info.deviceId);
           void maybeOfferRelayHosting(info.deviceId);
           log(`Restored connection: ${info.deviceName}`);
         } else {
-          setConnection(root, "Disconnected");
+          setConnection(root, "Disconnected", null);
         }
       })
       .catch((error) => {
-        setConnection(root, "Disconnected");
+        setConnection(root, "Disconnected", null);
         log(`Restore on reload failed: ${errorMessage(error)}`);
       });
   }
@@ -1489,68 +1577,70 @@ function bindColorBars(
   state: CameraState,
   send: (packet: Uint8Array, label: string) => Promise<void> | void,
 ): void {
-  const button = root.querySelector<HTMLButtonElement>("[data-color-bars]");
-  if (!button) return;
+  const buttons = root.querySelectorAll<HTMLButtonElement>("[data-color-bars]");
+  if (buttons.length === 0) return;
 
   const HOLD_MS = 1000;
 
-  let holdTimer: ReturnType<typeof setTimeout> | null = null;
-  let holdPointerId: number | null = null;
-
   const isBarsOn = (): boolean => state.current.unitOutputs?.colorBars === true;
 
-  const setArming = (on: boolean): void => {
-    button.classList.toggle("arming", on);
-  };
+  buttons.forEach((button) => {
+    let holdTimer: ReturnType<typeof setTimeout> | null = null;
+    let holdPointerId: number | null = null;
 
-  const cancelHold = (): void => {
-    if (holdTimer !== null) {
-      clearTimeout(holdTimer);
-      holdTimer = null;
-    }
-    holdPointerId = null;
-    setArming(false);
-  };
+    const setArming = (on: boolean): void => {
+      button.classList.toggle("arming", on);
+    };
 
-  const onPointerDown = (event: PointerEvent): void => {
-    event.preventDefault();
-    if (button.disabled) return;
-
-    if (isBarsOn()) {
-      try { button.setPointerCapture(event.pointerId); } catch { /* ignore */ }
-      state.applyUnitOutputsWrite({ colorBars: false });
-      void send(commands.colorBars(0), "Color bars off");
-      return;
-    }
-
-    try { button.setPointerCapture(event.pointerId); } catch { /* ignore */ }
-    holdPointerId = event.pointerId;
-    setArming(true);
-    holdTimer = setTimeout(() => {
-      holdTimer = null;
-      setArming(false);
+    const cancelHold = (): void => {
+      if (holdTimer !== null) {
+        clearTimeout(holdTimer);
+        holdTimer = null;
+      }
       holdPointerId = null;
-      state.applyUnitOutputsWrite({ colorBars: true });
-      void send(commands.colorBars(30), "Color bars on (held 1s)");
-    }, HOLD_MS);
-  };
+      setArming(false);
+    };
 
-  const onPointerEnd = (event: PointerEvent): void => {
-    if (holdPointerId !== null && event.pointerId === holdPointerId) {
-      cancelHold();
-    }
-    try { button.releasePointerCapture(event.pointerId); } catch { /* ignore */ }
-  };
+    const onPointerDown = (event: PointerEvent): void => {
+      event.preventDefault();
+      if (button.disabled) return;
 
-  button.addEventListener("pointerdown", onPointerDown);
-  button.addEventListener("pointerup", onPointerEnd);
-  button.addEventListener("pointercancel", onPointerEnd);
-  button.addEventListener("pointerleave", (event) => {
-    if (holdPointerId !== null && event.pointerId === holdPointerId) {
-      cancelHold();
-    }
+      if (isBarsOn()) {
+        try { button.setPointerCapture(event.pointerId); } catch { /* ignore */ }
+        state.applyUnitOutputsWrite({ colorBars: false });
+        void send(commands.colorBars(0), "Color bars off");
+        return;
+      }
+
+      try { button.setPointerCapture(event.pointerId); } catch { /* ignore */ }
+      holdPointerId = event.pointerId;
+      setArming(true);
+      holdTimer = setTimeout(() => {
+        holdTimer = null;
+        setArming(false);
+        holdPointerId = null;
+        state.applyUnitOutputsWrite({ colorBars: true });
+        void send(commands.colorBars(30), "Color bars on (held 1s)");
+      }, HOLD_MS);
+    };
+
+    const onPointerEnd = (event: PointerEvent): void => {
+      if (holdPointerId !== null && event.pointerId === holdPointerId) {
+        cancelHold();
+      }
+      try { button.releasePointerCapture(event.pointerId); } catch { /* ignore */ }
+    };
+
+    button.addEventListener("pointerdown", onPointerDown);
+    button.addEventListener("pointerup", onPointerEnd);
+    button.addEventListener("pointercancel", onPointerEnd);
+    button.addEventListener("pointerleave", (event) => {
+      if (holdPointerId !== null && event.pointerId === holdPointerId) {
+        cancelHold();
+      }
+    });
+    button.style.touchAction = "none";
   });
-  button.style.touchAction = "none";
 }
 
 function bindProgramReturnFeed(
@@ -1558,68 +1648,70 @@ function bindProgramReturnFeed(
   state: CameraState,
   send: (packet: Uint8Array, label: string) => Promise<void> | void,
 ): void {
-  const button = root.querySelector<HTMLButtonElement>("[data-program-return-feed]");
-  if (!button) return;
+  const buttons = root.querySelectorAll<HTMLButtonElement>("[data-program-return-feed]");
+  if (buttons.length === 0) return;
 
   const HOLD_MS = 3000;
 
-  let holdTimer: ReturnType<typeof setTimeout> | null = null;
-  let holdPointerId: number | null = null;
-
   const isReturnOn = (): boolean => state.current.unitOutputs?.programReturnFeed === true;
 
-  const setArming = (on: boolean): void => {
-    button.classList.toggle("arming", on);
-  };
+  buttons.forEach((button) => {
+    let holdTimer: ReturnType<typeof setTimeout> | null = null;
+    let holdPointerId: number | null = null;
 
-  const cancelHold = (): void => {
-    if (holdTimer !== null) {
-      clearTimeout(holdTimer);
-      holdTimer = null;
-    }
-    holdPointerId = null;
-    setArming(false);
-  };
+    const setArming = (on: boolean): void => {
+      button.classList.toggle("arming", on);
+    };
 
-  const onPointerDown = (event: PointerEvent): void => {
-    event.preventDefault();
-    if (button.disabled) return;
-
-    if (isReturnOn()) {
-      try { button.setPointerCapture(event.pointerId); } catch { /* ignore */ }
-      state.applyUnitOutputsWrite({ programReturnFeed: false });
-      void send(commands.programReturnFeed(0), "Program return feed off");
-      return;
-    }
-
-    try { button.setPointerCapture(event.pointerId); } catch { /* ignore */ }
-    holdPointerId = event.pointerId;
-    setArming(true);
-    holdTimer = setTimeout(() => {
-      holdTimer = null;
-      setArming(false);
+    const cancelHold = (): void => {
+      if (holdTimer !== null) {
+        clearTimeout(holdTimer);
+        holdTimer = null;
+      }
       holdPointerId = null;
-      state.applyUnitOutputsWrite({ programReturnFeed: true });
-      void send(commands.programReturnFeed(30), "Program return feed on (held 3s)");
-    }, HOLD_MS);
-  };
+      setArming(false);
+    };
 
-  const onPointerEnd = (event: PointerEvent): void => {
-    if (holdPointerId !== null && event.pointerId === holdPointerId) {
-      cancelHold();
-    }
-    try { button.releasePointerCapture(event.pointerId); } catch { /* ignore */ }
-  };
+    const onPointerDown = (event: PointerEvent): void => {
+      event.preventDefault();
+      if (button.disabled) return;
 
-  button.addEventListener("pointerdown", onPointerDown);
-  button.addEventListener("pointerup", onPointerEnd);
-  button.addEventListener("pointercancel", onPointerEnd);
-  button.addEventListener("pointerleave", (event) => {
-    if (holdPointerId !== null && event.pointerId === holdPointerId) {
-      cancelHold();
-    }
+      if (isReturnOn()) {
+        try { button.setPointerCapture(event.pointerId); } catch { /* ignore */ }
+        state.applyUnitOutputsWrite({ programReturnFeed: false });
+        void send(commands.programReturnFeed(0), "Program return feed off");
+        return;
+      }
+
+      try { button.setPointerCapture(event.pointerId); } catch { /* ignore */ }
+      holdPointerId = event.pointerId;
+      setArming(true);
+      holdTimer = setTimeout(() => {
+        holdTimer = null;
+        setArming(false);
+        holdPointerId = null;
+        state.applyUnitOutputsWrite({ programReturnFeed: true });
+        void send(commands.programReturnFeed(30), "Program return feed on (held 3s)");
+      }, HOLD_MS);
+    };
+
+    const onPointerEnd = (event: PointerEvent): void => {
+      if (holdPointerId !== null && event.pointerId === holdPointerId) {
+        cancelHold();
+      }
+      try { button.releasePointerCapture(event.pointerId); } catch { /* ignore */ }
+    };
+
+    button.addEventListener("pointerdown", onPointerDown);
+    button.addEventListener("pointerup", onPointerEnd);
+    button.addEventListener("pointercancel", onPointerEnd);
+    button.addEventListener("pointerleave", (event) => {
+      if (holdPointerId !== null && event.pointerId === holdPointerId) {
+        cancelHold();
+      }
+    });
+    button.style.touchAction = "none";
   });
-  button.style.touchAction = "none";
 }
 
 /**
@@ -1708,12 +1800,12 @@ function bindCall(
 /**
  * The Blackmagic protocol exposes auto WB only as one-shot triggers
  * (set / restore), not as a persistent mode the camera reports back.
- * The chassis "W/B" button is therefore a UI-only toggle: first press
- * triggers Set Auto WB and lights the LED; second press triggers
- * Restore Auto WB and clears it.
+ * The chassis "W/B" LED follows {@link CameraSnapshot.autoWhiteBalanceActive}
+ * so relay joiners stay aligned with the host.
  */
 function bindAutoWhiteBalanceToggle(
   root: HTMLElement,
+  state: CameraState,
   send: (packet: Uint8Array, label: string) => Promise<void> | void,
 ): void {
   const buttons = Array.from(
@@ -1726,20 +1818,13 @@ function bindAutoWhiteBalanceToggle(
     button.addEventListener("click", async () => {
       const isActive = button.classList.contains("active");
       if (isActive) {
-        setAutoWbActive(root, false);
+        state.setAutoWhiteBalanceActive(false);
         await send(commands.restoreAutoWhiteBalance(), "Restore auto WB");
       } else {
-        setAutoWbActive(root, true);
+        state.setAutoWhiteBalanceActive(true);
         await send(commands.setAutoWhiteBalance(), "Set auto WB");
       }
     });
-  });
-}
-
-function setAutoWbActive(root: HTMLElement, active: boolean): void {
-  root.querySelectorAll<HTMLButtonElement>("[data-video-set-auto-wb]").forEach((button) => {
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-pressed", active ? "true" : "false");
   });
 }
 
@@ -1837,9 +1922,9 @@ function bindVideoCard(
   log: (message: string) => void,
   send: (packet: Uint8Array, label: string) => Promise<void> | void,
 ): void {
-  bindAutoWhiteBalanceToggle(root, send);
+  bindAutoWhiteBalanceToggle(root, state, send);
   bind(root, "[data-video-restore-auto-wb]", "click", async () => {
-    setAutoWbActive(root, false);
+    state.setAutoWhiteBalanceActive(false);
     await send(commands.restoreAutoWhiteBalance(), "Restore auto WB");
   });
 
@@ -1918,6 +2003,8 @@ function bindPaintKnobs(
   };
 
   const SENSITIVITY_DEG = 270;
+  /** Pointer travel (px) for mouse/pen: drag this distance vertically to sweep the full parameter range. */
+  const VERTICAL_DRAG_PX_FOR_FULL_SPAN = 180;
   const minSendIntervalMs = 60;
 
   root.querySelectorAll<HTMLElement>("[data-paint-cell]").forEach((cell) => {
@@ -1934,7 +2021,10 @@ function bindPaintKnobs(
 
     let dragging = false;
     let pointerId: number | null = null;
+    /** `vertical`: drag up/down (mouse, pen). `angular`: rotate around knob (touch). */
+    let dragMode: "vertical" | "angular" = "angular";
     let startAngle = 0;
+    let startClientY = 0;
     let startValue = range.default;
     let pendingValue: number | null = null;
     let lastSent = 0;
@@ -1977,15 +2067,20 @@ function bindPaintKnobs(
     const onPointerMove = (event: PointerEvent): void => {
       if (!dragging || pointerId !== event.pointerId) return;
       event.preventDefault();
-      const rect = knob.getBoundingClientRect();
-      const cx = rect.left + rect.width / 2;
-      const cy = rect.top + rect.height / 2;
-      const angle = (Math.atan2(event.clientY - cy, event.clientX - cx) * 180) / Math.PI;
-      let delta = angle - startAngle;
-      if (delta > 180) delta -= 360;
-      if (delta < -180) delta += 360;
-
-      const next = Math.max(range.min, Math.min(range.max, startValue + (delta / SENSITIVITY_DEG) * span));
+      let next: number;
+      if (dragMode === "vertical") {
+        const deltaY = startClientY - event.clientY;
+        next = Math.max(range.min, Math.min(range.max, startValue + (deltaY / VERTICAL_DRAG_PX_FOR_FULL_SPAN) * span));
+      } else {
+        const rect = knob.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const angle = (Math.atan2(event.clientY - cy, event.clientX - cx) * 180) / Math.PI;
+        let delta = angle - startAngle;
+        if (delta > 180) delta -= 360;
+        if (delta < -180) delta += 360;
+        next = Math.max(range.min, Math.min(range.max, startValue + (delta / SENSITIVITY_DEG) * span));
+      }
       pendingValue = Number(next.toFixed(3));
       updateVisuals(pendingValue);
       flush(false);
@@ -2002,6 +2097,7 @@ function bindPaintKnobs(
     };
 
     knob.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
       event.preventDefault();
       dragging = true;
       pointerId = event.pointerId;
@@ -2009,11 +2105,17 @@ function bindPaintKnobs(
       cell.classList.add("dragging");
       cell.dataset.dragging = "true";
 
-      const rect = knob.getBoundingClientRect();
-      const cx = rect.left + rect.width / 2;
-      const cy = rect.top + rect.height / 2;
-      startAngle = (Math.atan2(event.clientY - cy, event.clientX - cx) * 180) / Math.PI;
       startValue = state.current.color[group][channel];
+      const finePointer = event.pointerType === "mouse" || event.pointerType === "pen";
+      dragMode = finePointer ? "vertical" : "angular";
+      if (dragMode === "vertical") {
+        startClientY = event.clientY;
+      } else {
+        const rect = knob.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        startAngle = (Math.atan2(event.clientY - cy, event.clientX - cx) * 180) / Math.PI;
+      }
     });
 
     knob.addEventListener("pointermove", onPointerMove);
@@ -2211,7 +2313,7 @@ function bindStepper(
 
 function stepGainDb(current: number, direction: StepDirection): number {
   const next = Math.round(current + direction);
-  return clampNumber(next, -128, 127);
+  return clampNumber(next, MASTER_GAIN_RANGE.min, MASTER_GAIN_RANGE.max);
 }
 
 const ISO_LADDER = [100, 125, 160, 200, 250, 320, 400, 500, 640, 800, 1000, 1250, 1600, 2000, 2500, 3200, 4000, 5000, 6400, 8000, 12800, 25600];
@@ -2245,19 +2347,6 @@ function stepTint(current: number, direction: StepDirection): number {
   return clampNumber(next, -50, 50);
 }
 
-function stepNdStops(current: number, direction: StepDirection): number {
-  const ladder = [0, 0.6, 1.2, 1.8, 2.4, 3.0, 3.6, 4.2, 4.8, 5.4, 6.0];
-  const tolerance = 0.05;
-  let idx = ladder.findIndex((v) => Math.abs(v - current) <= tolerance);
-  if (idx === -1) {
-    idx = direction > 0 ? ladder.findIndex((v) => v > current) : [...ladder].reverse().findIndex((v) => v < current);
-    if (idx === -1) idx = 0;
-  } else {
-    idx = clampNumber(idx + direction, 0, ladder.length - 1);
-  }
-  return ladder[idx]!;
-}
-
 function currentShutterDegrees(rawAngle: number | undefined): number {
   if (rawAngle === undefined) return 180;
   return rawAngle / 100;
@@ -2279,7 +2368,10 @@ const PULSE_TARGETS: Array<{
   { selector: "[data-stepper='gain']", changed: (a, b) => a.gainDb !== b.gainDb },
   { selector: "[data-stepper='iso']", changed: (a, b) => a.iso !== b.iso },
   { selector: "[data-stepper='shutter']", changed: (a, b) => a.shutterAngle !== b.shutterAngle },
-  { selector: "[data-stepper='nd']", changed: (a, b) => a.ndFilterStops !== b.ndFilterStops },
+  {
+    selector: "[data-stepper='nd']",
+    changed: (a, b) => a.ndFilterStops !== b.ndFilterStops || a.ndFilterDisplayMode !== b.ndFilterDisplayMode,
+  },
   { selector: "[data-auto-exp]", changed: (a, b) => a.autoExposureMode !== b.autoExposureMode },
 ];
 
@@ -2525,18 +2617,37 @@ function bind(root: HTMLElement, selector: string, eventName: string, handler: (
 
 function buildPanelSyncPayload(snapshot: CameraSnapshot): Record<string, unknown> | null {
   const out: Record<string, unknown> = {};
-  if (snapshot.unitOutputs) out.unitOutputs = snapshot.unitOutputs;
+  out.unitOutputs = {
+    colorBars: snapshot.unitOutputs?.colorBars === true,
+    programReturnFeed: snapshot.unitOutputs?.programReturnFeed === true,
+  };
   if (snapshot.displayLut) out.displayLut = snapshot.displayLut;
   if (snapshot.cameraNumber !== undefined) out.cameraNumber = snapshot.cameraNumber;
   if (snapshot.metadata && Object.keys(snapshot.metadata).length > 0) {
     out.metadata = { ...snapshot.metadata };
   }
+  const colorOut: Record<string, unknown> = {
+    lift: { ...snapshot.color.lift },
+    gamma: { ...snapshot.color.gamma },
+    gain: { ...snapshot.color.gain },
+    offset: { ...snapshot.color.offset },
+  };
+  if (snapshot.color.contrast) colorOut.contrast = { ...snapshot.color.contrast };
+  if (snapshot.color.lumaMix !== undefined) colorOut.lumaMix = snapshot.color.lumaMix;
+  if (snapshot.color.hue !== undefined) colorOut.hue = snapshot.color.hue;
+  if (snapshot.color.saturation !== undefined) colorOut.saturation = snapshot.color.saturation;
+  out.color = colorOut;
+  if (snapshot.status) out.status = cameraStatusForRelayWire(snapshot.status);
+  if (typeof snapshot.autoWhiteBalanceActive === "boolean") {
+    out.autoWhiteBalanceActive = snapshot.autoWhiteBalanceActive;
+  }
+  if (snapshot.gainDb !== undefined) out.gainDb = snapshot.gainDb;
+  if (snapshot.iso !== undefined) out.iso = snapshot.iso;
+  if (snapshot.ndFilterStops !== undefined) out.ndFilterStops = snapshot.ndFilterStops;
+  if (snapshot.ndFilterDisplayMode !== undefined) out.ndFilterDisplayMode = snapshot.ndFilterDisplayMode;
+  if (snapshot.deviceName) out.deviceName = snapshot.deviceName;
   return Object.keys(out).length > 0 ? out : null;
 }
-
-/** Side-channel marker tucked into a `panel_sync` snapshot to nudge joiners
- *  to refetch their per-device bank list / loaded slot from the server. */
-const RELAY_BANKS_REVISION_KEY = "__relayBanksRevision";
 
 async function runAction(
   log: (message: string) => void,
@@ -2556,10 +2667,14 @@ async function runAction(
   }
 }
 
-function setConnection(root: HTMLElement, message: string): void {
+function setConnection(root: HTMLElement, message: string, cameraRawName?: string | null): void {
   const element = root.querySelector<HTMLElement>("[data-connection]");
   if (element) {
     element.textContent = message;
+    element.hidden = message.trim().length === 0;
+  }
+  if (cameraRawName !== undefined) {
+    updateAppHeaderCameraProduct(root, cameraRawName ?? undefined);
   }
 }
 

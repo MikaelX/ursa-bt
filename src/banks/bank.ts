@@ -32,6 +32,8 @@ export interface Bank {
     phantomPower?: boolean;
   };
   ndFilterStops?: number;
+  /** 0 = stops, 1 = density, 2 = transmittance — echoed with ND stops (param 16). */
+  ndFilterDisplayMode?: number;
   dynamicRange?: number;
   sharpeningLevel?: number;
   displayLut?: { selected: number; enabled: boolean };
@@ -94,6 +96,7 @@ export function buildBankFromSnapshot(snapshot: CameraSnapshot): Bank {
           }
         : undefined,
     ndFilterStops: snapshot.ndFilterStops,
+    ndFilterDisplayMode: snapshot.ndFilterDisplayMode,
     dynamicRange: snapshot.dynamicRange,
     sharpeningLevel: snapshot.sharpeningLevel,
     displayLut: snapshot.displayLut ? { ...snapshot.displayLut } : undefined,
@@ -134,7 +137,11 @@ export async function applyColorBankToCamera(client: BankWriter, bank: Bank): Pr
   }
 }
 
-export async function applyBankToCamera(client: BankWriter, bank: Bank): Promise<void> {
+export async function applyBankToCamera(
+  client: BankWriter,
+  bank: Bank,
+  options?: { skipNdBle?: boolean },
+): Promise<void> {
   const send = (packet: Uint8Array): Promise<void> => client.writeCommand(packet);
 
   if (bank.whiteBalance) {
@@ -175,8 +182,8 @@ export async function applyBankToCamera(client: BankWriter, bank: Bank): Promise
     if (a.phantomPower !== undefined) await send(commands.phantomPower(a.phantomPower));
   }
 
-  if (bank.ndFilterStops !== undefined) {
-    await send(commands.ndFilterStops(bank.ndFilterStops));
+  if (!options?.skipNdBle && bank.ndFilterStops !== undefined) {
+    await send(commands.ndFilterStops(bank.ndFilterStops, bank.ndFilterDisplayMode ?? 0));
   }
 
   if (bank.dynamicRange !== undefined) await send(commands.dynamicRange(bank.dynamicRange));

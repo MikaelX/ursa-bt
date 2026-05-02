@@ -185,11 +185,12 @@ label {
 }
 
 .power-btn .power-led {
-  width: 0.55rem;
-  height: 0.55rem;
-  border-radius: 50%;
+  box-sizing: border-box;
+  width: 10px;
+  height: 3px;
+  border-radius: 2px;
   background: var(--led-off, #0a0a0b);
-  box-shadow: inset 0 0 4px rgba(0, 0, 0, 0.7);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.75);
   flex: 0 0 auto;
 }
 
@@ -594,17 +595,18 @@ button.bluefy-modal-dismiss {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 0.5rem;
+  gap: 0.38rem;
   width: 100%;
-  padding: 0.55rem 0.7rem;
+  padding: 0.45rem 0.55rem;
 }
 
 .auto-exp-led {
-  width: 0.7rem;
-  height: 0.7rem;
-  border-radius: 50%;
+  box-sizing: border-box;
+  width: 10px;
+  height: 3px;
+  border-radius: 2px;
   background: var(--led-off, #0a0a0b);
-  box-shadow: inset 0 0 4px rgba(0, 0, 0, 0.7);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.75);
   flex: 0 0 auto;
 }
 
@@ -649,16 +651,25 @@ button.bluefy-modal-dismiss {
 
 .unit-btn-cell {
   grid-template-columns: 1fr;
-  grid-template-rows: auto auto auto auto;
+  grid-template-rows: auto auto auto;
   align-content: center;
   justify-items: center;
-  gap: 0.18rem;
-  padding: 0.4rem 0.55rem 0.4rem;
+  gap: 0.14rem;
+  padding: 0.32rem 0.45rem 0.32rem;
+}
+
+.unit-btn-head {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 0.36rem;
+  width: 100%;
 }
 
 .unit-btn-indicator {
-  font-size: 0.62rem;
-  letter-spacing: 0.18em;
+  font-size: 0.58rem;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
   color: #6b7077;
   font-weight: 700;
@@ -666,21 +677,22 @@ button.bluefy-modal-dismiss {
 }
 
 .unit-btn-led {
-  width: 0.95rem;
-  height: 0.32rem;
-  border-radius: 0.2rem;
+  box-sizing: border-box;
+  width: 10px;
+  height: 3px;
+  border-radius: 2px;
   background: #2a2d31;
-  box-shadow: inset 0 0 3px rgba(0, 0, 0, 0.7);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.75);
   transition: background 120ms ease, box-shadow 120ms ease;
 }
 
 /* Unit-key (W/B, BARS, RTN). Inherits .bm-btn face; sized to fill the
-   stepper cell. Active state lights the indicator label + LED above. */
+   stepper cell. Active state lights the indicator label + LED (left). */
 .unit-btn {
   width: 100%;
-  min-height: 2.1rem;
-  padding: 0.45rem 0.6rem;
-  font-size: 0.8rem;
+  min-height: 1.85rem;
+  padding: 0.34rem 0.45rem;
+  font-size: 0.72rem;
   letter-spacing: 0.08em;
 }
 
@@ -870,6 +882,19 @@ button.bluefy-modal-dismiss {
   line-height: 1;
 }
 
+/* Fixed-width readouts: space slots reserve glyph width without visible segments */
+.bm-seg__digit.bm-seg__digit--blank {
+  min-width: 0.48em;
+}
+
+.bm-seg__digit.bm-seg__digit--blank .bm-seg__ghost {
+  opacity: 0.12;
+}
+
+.bm-seg__digit.bm-seg__digit--blank .bm-seg__value {
+  opacity: 0;
+}
+
 /* Paint-knob value as a 7-seg readout (3-4 digits incl. sign + decimal). */
 .app-bm-seg-readout.paint-value-seg.bm-seg2 {
   padding: 0.18rem 0.35rem;
@@ -919,23 +944,33 @@ button.bluefy-modal-dismiss {
   letter-spacing: 0.14em;
 }
 
-@media (max-width: 720px) {
-  .paint-knobs {
-    grid-template-columns: repeat(4, 1fr);
-    gap: 0.25rem;
-  }
-  .knob-cell {
-    grid-template-columns: 1fr;
-    justify-items: center;
-    gap: 0.2rem;
-    padding: 0.4rem 0.2rem;
-  }
-  .knob-meta {
-    align-items: center;
-  }
-  .knob-value {
-    font-size: 0.9rem;
-  }
+/* Color quick-paint: same compact knob grid on all breakpoints (was ≤720px only). */
+.view--color .paint-knobs {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.25rem;
+}
+
+.view--color .paint-knob-cell {
+  grid-template-columns: 1fr;
+  justify-items: center;
+  gap: 0.2rem;
+  padding: 0.4rem 0.2rem;
+}
+
+.view--color .paint-knob-cell .knob-meta {
+  align-items: center;
+}
+
+.view--color .paint-knob-cell .knob-value {
+  font-size: 0.9rem;
+}
+
+.view--color .paint-knob-cell .paint-bm-knob {
+  --size: 42px;
+}
+
+.view--color .paint-actions-buttons {
+  flex-wrap: wrap;
 }
 
 /* Scene file (banks) row */
@@ -952,7 +987,7 @@ button.bluefy-modal-dismiss {
 .scene-file-label {
   font-size: 0.65rem;
   letter-spacing: 0.14em;
-  color: #c4cad2;
+  color: #e8edf5;
   text-transform: uppercase;
   white-space: nowrap;
 }
@@ -966,30 +1001,53 @@ button.bluefy-modal-dismiss {
 .scene-bank {
   position: relative;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
   justify-content: center;
-  gap: 0.18rem;
+  gap: 0.32rem;
   flex: 1;
-  min-height: 32px;
-  padding: 0.25rem 0.25rem;
+  min-height: 26px;
+  padding: 0.18rem 0.32rem;
   border-radius: 0.35rem;
-  background: #f5f5f5;
-  color: #1a1c1f;
-  border: 1px solid #c8c9cb;
-  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.15), 0 1px 0 rgba(0, 0, 0, 0.35);
+  background: linear-gradient(180deg, #14171b 0%, #0b0d10 100%);
+  color: #7a8494;
+  border: 1px solid #252a32;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    inset 0 -2px 5px rgba(0, 0, 0, 0.5),
+    0 1px 0 rgba(0, 0, 0, 0.35);
   font-weight: 700;
-  font-size: 0.8rem;
+  font-size: 0.72rem;
+  transition:
+    color 0.14s ease,
+    border-color 0.14s ease,
+    box-shadow 0.14s ease,
+    background 0.14s ease;
 }
 
+/* Saved slot — brighter numeral; LED shows a dim “content” pin */
 .scene-bank.filled {
-  background: #d6dde2;
+  color: #dce3ee;
+  border-color: #343c48;
 }
 
+.scene-bank.filled .scene-bank-led {
+  background: rgba(255, 255, 255, 0.22);
+  box-shadow:
+    inset 0 1px 1px rgba(0, 0, 0, 0.5),
+    0 0 4px rgba(255, 255, 255, 0.1);
+}
+
+/* Loaded = active scene: same dark face, white indicator */
 .scene-bank.loaded {
-  background: #2faa4d;
-  color: #fff;
-  border-color: #1d6f33;
+  color: #f4f7fc;
+  border-color: #4a5566;
+  background: linear-gradient(180deg, #181c22 0%, #0f1116 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    inset 0 -2px 5px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(255, 255, 255, 0.1),
+    0 0 12px rgba(255, 255, 255, 0.06);
 }
 
 .scene-bank-label {
@@ -997,29 +1055,45 @@ button.bluefy-modal-dismiss {
 }
 
 .scene-bank-led {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.2);
-  transition: background 0.12s, box-shadow 0.12s;
+  box-sizing: border-box;
+  width: 10px;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.85);
+  transition:
+    background 0.14s ease,
+    box-shadow 0.14s ease,
+    border-color 0.14s ease;
 }
 
 .scene-bank.loaded .scene-bank-led {
-  background: #d3ffd9;
-  box-shadow: 0 0 6px #6cf08c, 0 0 1px #2faa4d;
+  background: #f2f5fa;
+  border-color: rgba(255, 255, 255, 0.45);
+  box-shadow:
+    0 0 5px rgba(255, 255, 255, 0.75),
+    0 0 1px rgba(255, 255, 255, 0.45),
+    inset 0 -1px 1px rgba(0, 0, 0, 0.12);
 }
 
 .scene-bank.loaded.dirty {
-  background: #1f6c34;
-  color: #d8efdd;
-  border-color: #154a23;
-  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.25), 0 1px 0 rgba(0, 0, 0, 0.35);
-  opacity: 0.78;
+  color: #e8ecf4;
+  border-color: #5c4a2e;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 200, 120, 0.08),
+    inset 0 -2px 5px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(255, 176, 80, 0.28),
+    0 0 10px rgba(255, 160, 60, 0.12);
 }
 
 .scene-bank.loaded.dirty .scene-bank-led {
-  background: #6c9876;
-  box-shadow: none;
+  background: #fff8e8;
+  border-color: rgba(255, 200, 120, 0.55);
+  box-shadow:
+    0 0 5px rgba(255, 200, 120, 0.55),
+    0 0 1px rgba(255, 220, 160, 0.35),
+    inset 0 -1px 1px rgba(0, 0, 0, 0.12);
 }
 
 .scene-file-banks.store-armed .scene-bank {
@@ -1028,23 +1102,27 @@ button.bluefy-modal-dismiss {
   cursor: copy;
 }
 
-/* STORE arms the scene-bank slots for save. .bm-btn provides the face;
-   armed state matches the dashed amber outline on the slot row. */
+/* STORE: dark like the row; armed = amber ring + bright label (no light keycap) */
 .scene-store {
   font-size: 0.65rem;
   letter-spacing: 0.1em;
   padding: 0.35rem 0.7rem;
   min-height: 2.1rem;
   white-space: nowrap;
+  color: #dce3ee;
 }
 
-.scene-store.armed {
-  color: #1a1c1f;
-  background: linear-gradient(180deg, #ffc97a 0%, #ffb020 55%, #c97c00 100%);
+.scene-store.bm-btn[aria-pressed="true"],
+.scene-store.bm-btn.armed {
+  color: #fff4e0;
+  background: linear-gradient(180deg, #2a2418 0%, #1a1710 55%, #0e0c09 100%);
+  border-color: #6a4820;
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.35),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.4),
-    0 0 12px var(--led-amber-glow, rgba(255, 176, 32, 0.55));
+    inset 0 1px 0 rgba(255, 200, 120, 0.12),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(255, 176, 80, 0.4),
+    0 0 14px rgba(255, 160, 60, 0.28),
+    0 1px 3px rgba(0, 0, 0, 0.5);
 }
 
 @media (max-width: 720px) {
@@ -1291,9 +1369,10 @@ button.bluefy-modal-dismiss {
 
 .footer-led::before {
   content: "";
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
+  box-sizing: border-box;
+  width: 10px;
+  height: 3px;
+  border-radius: 2px;
   background: var(--led);
 }
 
@@ -1326,9 +1405,10 @@ button.bluefy-modal-dismiss {
 
 .led::before {
   content: "";
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
+  box-sizing: border-box;
+  width: 10px;
+  height: 3px;
+  border-radius: 2px;
   background: var(--led);
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.05);
 }
@@ -1499,6 +1579,68 @@ button.bluefy-modal-dismiss {
 .color-hfader {
   width: 100%;
   max-width: none;
+}
+
+/* Color Correction — Advanced: same sizing as narrow phones on all viewports */
+.color-card .color-group-columns {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.28rem;
+}
+
+.color-card .color-column {
+  min-width: 0;
+  width: 100%;
+}
+
+.color-card .color-column .readout-mini {
+  font-size: clamp(0.72rem, 2.5vw, 0.88rem);
+}
+
+.color-card .color-tone {
+  font-size: clamp(0.62rem, 2.2vw, 0.78rem);
+}
+
+.color-card .mini-fader.color-vfader {
+  width: 100%;
+  max-width: none;
+  height: clamp(12rem, 52vmin, 17rem);
+  padding: clamp(0.45rem, 3vw, 0.65rem) clamp(0.25rem, 2vw, 0.35rem);
+}
+
+.color-card .mini-fader.color-vfader .mini-fader-scale {
+  inset: clamp(0.45rem, 3vw, 0.65rem) auto clamp(0.45rem, 3vw, 0.65rem) 0.2rem;
+  font-size: clamp(0.54rem, 2.8vw, 0.68rem);
+}
+
+.color-card .mini-fader.color-vfader.app-bm-mini-fader .bm-mfader__track {
+  width: clamp(5px, 12%, 10px);
+  top: clamp(0.45rem, 3vw, 0.65rem);
+  bottom: clamp(0.45rem, 3vw, 0.65rem);
+  --thumb-h: clamp(12px, 3.2vmin, 16px);
+}
+
+.color-card .mini-fader.color-vfader.app-bm-mini-fader .bm-mfader__thumb {
+  width: clamp(20px, 6vmin, 32px);
+  height: clamp(12px, 3.2vmin, 16px);
+}
+
+.color-card .mini-fader.color-vfader.app-bm-mini-fader .bm-mfader__cap {
+  width: 100%;
+  height: 100%;
+}
+
+.color-card .color-hfader {
+  max-width: none;
+  height: clamp(46px, 12vw, 52px);
+  padding: clamp(0.42rem, 3vw, 0.55rem) clamp(0.45rem, 2vw, 0.65rem);
+}
+
+.color-card .color-hfader .h-fader-scale {
+  font-size: clamp(0.54rem, 2.8vw, 0.65rem);
+}
+
+.color-card .color-hfader.app-bm-hfader-inline {
+  --thumb-w: min(calc(100% - 4px), 2.25rem);
 }
 
 .status-flags {
@@ -1788,12 +1930,13 @@ button.bluefy-modal-dismiss {
 }
 
 .audio-phantom-led {
-  width: 0.8rem;
-  height: 0.8rem;
-  border-radius: 50%;
+  box-sizing: border-box;
+  width: 10px;
+  height: 3px;
+  border-radius: 2px;
   background: #2a2a2a;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  box-shadow: inset 0 0 3px rgba(0, 0, 0, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.65);
   transition: background 120ms ease, box-shadow 120ms ease;
 }
 
@@ -1868,70 +2011,6 @@ button.bluefy-modal-dismiss {
   }
   .audio-row-grid {
     grid-template-columns: 1fr;
-  }
-
-  /* Color ADV: single-column stack of Lift, Gamma, Gain, extras (inherits .color-body) */
-  .color-card .color-group-columns {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 0.28rem;
-  }
-
-  .color-card .color-column {
-    min-width: 0;
-    width: 100%;
-  }
-
-  .color-column .readout-mini {
-    font-size: clamp(0.72rem, 2.5vw, 0.88rem);
-  }
-
-  .color-tone {
-    font-size: clamp(0.62rem, 2.2vw, 0.78rem);
-  }
-
-  .color-card .mini-fader.color-vfader {
-    width: 100%;
-    max-width: none;
-    height: clamp(12rem, 52vmin, 17rem);
-    padding: clamp(0.45rem, 3vw, 0.65rem) clamp(0.25rem, 2vw, 0.35rem);
-  }
-
-  .color-card .mini-fader.color-vfader .mini-fader-scale {
-    inset: clamp(0.45rem, 3vw, 0.65rem) auto clamp(0.45rem, 3vw, 0.65rem) 0.2rem;
-    font-size: clamp(0.54rem, 2.8vw, 0.68rem);
-  }
-
-  .color-card .mini-fader.color-vfader.app-bm-mini-fader .bm-mfader__track {
-    width: clamp(5px, 12%, 10px);
-    top: clamp(0.45rem, 3vw, 0.65rem);
-    bottom: clamp(0.45rem, 3vw, 0.65rem);
-    --thumb-h: clamp(12px, 3.2vmin, 16px);
-  }
-
-  .color-card .mini-fader.color-vfader.app-bm-mini-fader .bm-mfader__thumb {
-    width: clamp(20px, 6vmin, 32px);
-    height: clamp(12px, 3.2vmin, 16px);
-  }
-  .color-card .mini-fader.color-vfader.app-bm-mini-fader .bm-mfader__cap {
-    width: 100%;
-    height: 100%;
-  }
-  .color-extras {
-    grid-template-columns: 1fr;
-  }
-
-  .color-hfader {
-    max-width: none;
-    height: clamp(46px, 12vw, 52px);
-    padding: clamp(0.42rem, 3vw, 0.55rem) clamp(0.45rem, 2vw, 0.65rem);
-  }
-
-  .color-hfader .h-fader-scale {
-    font-size: clamp(0.54rem, 2.8vw, 0.65rem);
-  }
-
-  .color-hfader.app-bm-hfader-inline {
-    --thumb-w: min(calc(100% - 4px), 2.25rem);
   }
 }
 
@@ -2092,13 +2171,14 @@ button.bluefy-modal-dismiss {
 
 .side-btn-led {
   display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+  box-sizing: border-box;
+  width: 10px;
+  height: 3px;
+  border-radius: 2px;
   background: #3a2010;
-  margin-right: 0.4rem;
+  margin-right: 0.35rem;
   vertical-align: middle;
-  box-shadow: inset 0 0 2px rgba(0, 0, 0, 0.7);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.75);
   transition: background 120ms ease, box-shadow 120ms ease;
 }
 
@@ -2281,17 +2361,8 @@ body {
     min-width: 4rem;
   }
   .scene-bank {
-    min-height: 2.4rem;
-    font-size: 0.85rem;
-  }
-
-  /* Paint knobs: make 2 rows of 4 columns become 3 rows x 4 still,
-     but enlarge knobs slightly for fingertips */
-  .paint-knobs {
-    gap: 0.3rem;
-  }
-  .paint-knob-cell .paint-bm-knob {
-    --size: 42px;
+    min-height: 2rem;
+    font-size: 0.76rem;
   }
 
   /* Footer row – wrap on mobile */
@@ -2477,6 +2548,43 @@ body {
   color: #8fbcff;
   font-weight: 700;
   text-transform: uppercase;
+}
+
+.app-header-live {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+/* Primary camera identity — reads as a chassis badge, not body copy */
+.app-header-camera-badge.app-header-camera-product {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  max-width: min(100%, 15.5rem);
+  margin: 0;
+  padding: 0.3rem 0.75rem 0.34rem;
+  border-radius: 0.42rem;
+  font-size: 0.74rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  line-height: 1.05;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #f4f7fd;
+  background: linear-gradient(168deg, #323842 0%, #1a1e24 42%, #101318 100%);
+  border: 1px solid rgba(236, 201, 120, 0.38);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.55),
+    0 2px 6px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.4);
+  text-shadow:
+    0 1px 1px rgba(0, 0, 0, 0.85),
+    0 0 18px rgba(236, 201, 120, 0.12);
 }
 
 .app-header-pill {
@@ -3006,11 +3114,12 @@ body {
 }
 
 .iris-focus-toggle-led {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+  box-sizing: border-box;
+  width: 10px;
+  height: 3px;
+  border-radius: 2px;
   background: var(--led-off, #0a0a0b);
-  box-shadow: inset 0 0 3px rgba(0, 0, 0, 0.7);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.75);
   flex: 0 0 auto;
 }
 
@@ -3083,6 +3192,16 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.iris-info-strip__nd--manual-ref b {
+  color: #ffb020;
+  text-shadow: 0 0 6px rgba(255, 176, 32, 0.55);
+}
+
+.iris-info-strip__nd--ursa-manual b {
+  color: #ff9a3c;
+  text-shadow: 0 0 8px rgba(255, 120, 55, 0.52);
 }
 
 /* Tablet & up — larger iris rail; side keys in 4 cols */
@@ -3262,16 +3381,6 @@ body {
   }
 }
 
-/* Color view: paint knobs grid for mobile */
-@media (max-width: 480px) {
-  .view--color .paint-knobs {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-  .view--color .paint-actions-buttons {
-    flex-wrap: wrap;
-  }
-}
-
 /* Very narrow phones (≤ 380px) */
 @media (max-width: 380px) {
   .view-nav-tab {
@@ -3307,6 +3416,11 @@ body {
   }
   .app-header-pill {
     font-size: 0.78rem;
+  }
+  .app-header-camera-badge.app-header-camera-product {
+    font-size: 0.84rem;
+    padding: 0.34rem 0.85rem 0.38rem;
+    border-radius: 0.48rem;
   }
   .app-header-cam-digit {
     font-size: 1.2rem;
@@ -3413,17 +3527,6 @@ body {
     font-size: 0.6rem;
     padding: 0.18rem 0.18rem;
     line-height: 1;
-  }
-
-  /* Color view ADV opens beside the knob area on wide displays */
-  .view--color {
-    display: grid;
-    grid-template-columns: 1fr;
-    gap: 1rem;
-  }
-  .view--color:has(.color-card:not([hidden])) {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
-    align-items: start;
   }
 }
 

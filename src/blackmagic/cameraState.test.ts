@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { CameraState } from "./cameraState";
-import { commands } from "./protocol";
+import { CameraState, shouldRelayPanelSyncCommand } from "./cameraState";
+import { commands, encodeConfigurationCommand, fixed16Payload, CameraControlDataType } from "./protocol";
+import type { CameraStatus } from "./status";
 
 describe("CameraState", () => {
   it("ingests white balance and gain packets", () => {
@@ -103,6 +104,39 @@ describe("CameraState", () => {
     const state = new CameraState();
     state.ingestIncomingPacket(commands.ndFilterStops(1.8));
     expect(state.current.ndFilterStops).toBeCloseTo(1.8, 1);
+    expect(state.current.ndFilterDisplayMode).toBe(0);
+  });
+
+  it("ingests ND display mode from second Fixed16 on Video param 16", () => {
+    const state = new CameraState();
+    state.ingestIncomingPacket(commands.ndFilterStops(1.2, 2));
+    expect(state.current.ndFilterStops).toBeCloseTo(1.2, 1);
+    expect(state.current.ndFilterDisplayMode).toBe(2);
+  });
+
+  it("does not overwrite ndFilterDisplayMode when Video param 16 carries only stops", () => {
+    const state = new CameraState();
+    state.ingestIncomingPacket(commands.ndFilterStops(0.9, 1));
+    expect(state.current.ndFilterDisplayMode).toBe(1);
+    const stopsOnly = encodeConfigurationCommand({
+      category: 1,
+      parameter: 16,
+      dataType: CameraControlDataType.Fixed16,
+      payload: fixed16Payload(0.3),
+    });
+    state.ingestIncomingPacket(stopsOnly);
+    expect(state.current.ndFilterStops).toBeCloseTo(0.3, 1);
+    expect(state.current.ndFilterDisplayMode).toBe(1);
+  });
+
+  it("ignores ND from BLE incoming when device is URSA; still applies ND from relay command bytes", () => {
+    const state = new CameraState();
+    state.setDeviceName("URSA Broadcast");
+    state.applyNdFilterStopsWrite(2);
+    state.ingestIncomingPacket(commands.ndFilterStops(0, 0));
+    expect(state.current.ndFilterStops).toBeCloseTo(2, 1);
+    expect(state.applyRelayPanelSyncFromCommandBytes(commands.ndFilterStops(4, 0))).toBe(true);
+    expect(state.current.ndFilterStops).toBeCloseTo(4, 1);
   });
 
   it("ingests display color bars and program return (category 4)", () => {
@@ -124,6 +158,111 @@ describe("CameraState", () => {
     state.relayPanelSyncPatch({ unitOutputs: { colorBars: true, programReturnFeed: false } });
     expect(state.current.gainDb).toBe(6);
     expect(state.current.unitOutputs?.colorBars).toBe(true);
+  });
+
+  it("relayPanelSyncPatch merges status (paired) without resetting unrelated fields", () => {
+    const state = new CameraState();
+    state.ingestIncomingPacket(commands.gain(6));
+    const st: CameraStatus = {
+      raw: 0x07,
+      powerOn: true,
+      connected: true,
+      paired: true,
+      versionsVerified: false,
+      initialPayloadReceived: false,
+      cameraReady: false,
+      labels: ["Power On", "Connected", "Paired"],
+      payloadHex: "07",
+      statusByteReservedBits: 0,
+    };
+    state.relayPanelSyncPatch({ status: st });
+    expect(state.current.gainDb).toBe(6);
+    expect(state.current.status?.paired).toBe(true);
+    expect(state.current.status?.raw).toBe(0x07);
+  });
+
+  it("shouldRelayPanelSyncCommand is true for auto WB set/restore", () => {
+    expect(shouldRelayPanelSyncCommand(commands.setAutoWhiteBalance())).toBe(true);
+    expect(shouldRelayPanelSyncCommand(commands.restoreAutoWhiteBalance())).toBe(true);
+  });
+
+  it("shouldRelayPanelSyncCommand is true for program return and color bars", () => {
+    expect(shouldRelayPanelSyncCommand(commands.programReturnFeed(30))).toBe(true);
+    expect(shouldRelayPanelSyncCommand(commands.programReturnFeed(0))).toBe(true);
+    expect(shouldRelayPanelSyncCommand(commands.colorBars(30))).toBe(true);
+  });
+
+  it("shouldRelayPanelSyncCommand is true for master gain and ISO", () => {
+    expect(shouldRelayPanelSyncCommand(commands.gain(6))).toBe(true);
+    expect(shouldRelayPanelSyncCommand(commands.iso(800))).toBe(true);
+  });
+
+  it("shouldRelayPanelSyncCommand is true for ND stops and ND display mode", () => {
+    expect(shouldRelayPanelSyncCommand(commands.ndFilterStops(1.2, 0))).toBe(true);
+    expect(shouldRelayPanelSyncCommand(commands.ndFilterDisplayMode(1))).toBe(true);
+  });
+
+  it("ingests auto WB set/restore and clears LED on incoming white balance", () => {
+    const state = new CameraState();
+    state.ingestIncomingPacket(commands.setAutoWhiteBalance());
+    expect(state.current.autoWhiteBalanceActive).toBe(true);
+    state.ingestIncomingPacket(commands.restoreAutoWhiteBalance());
+    expect(state.current.autoWhiteBalanceActive).toBe(false);
+    state.setAutoWhiteBalanceActive(true);
+    state.ingestIncomingPacket(commands.whiteBalance(4800, 12));
+    expect(state.current.autoWhiteBalanceActive).toBe(false);
+    expect(state.current.whiteBalance).toEqual({ temperature: 4800, tint: 12 });
+  });
+
+  it("relayPanelSyncPatch merges autoWhiteBalanceActive", () => {
+    const state = new CameraState();
+    state.relayPanelSyncPatch({ autoWhiteBalanceActive: true });
+    expect(state.current.autoWhiteBalanceActive).toBe(true);
+    state.relayPanelSyncPatch({ autoWhiteBalanceActive: false });
+    expect(state.current.autoWhiteBalanceActive).toBe(false);
+  });
+
+  it("applyRelayPanelSyncFromCommandBytes mirrors lift from forwarded joiner bytes", () => {
+    const state = new CameraState();
+    const ok = state.applyRelayPanelSyncFromCommandBytes(commands.lift(0.5, -0.25, 0.1, 0));
+    expect(ok).toBe(true);
+    expect(state.current.color.lift.red).toBeCloseTo(0.5, 2);
+    expect(state.current.color.lift.green).toBeCloseTo(-0.25, 2);
+  });
+
+  it("applyRelayPanelSyncFromCommandBytes mirrors program return from forwarded joiner bytes", () => {
+    const state = new CameraState();
+    expect(state.applyRelayPanelSyncFromCommandBytes(commands.programReturnFeed(30))).toBe(true);
+    expect(state.current.unitOutputs?.programReturnFeed).toBe(true);
+    expect(state.applyRelayPanelSyncFromCommandBytes(commands.programReturnFeed(0))).toBe(true);
+    expect(state.current.unitOutputs?.programReturnFeed).toBe(false);
+  });
+
+  it("applyRelayPanelSyncFromCommandBytes mirrors master gain from forwarded joiner bytes", () => {
+    const state = new CameraState();
+    expect(state.applyRelayPanelSyncFromCommandBytes(commands.gain(12))).toBe(true);
+    expect(state.current.gainDb).toBe(12);
+  });
+
+  it("relayPanelSyncPatch merges gainDb and iso", () => {
+    const state = new CameraState();
+    state.relayPanelSyncPatch({ gainDb: 18, iso: 400 });
+    expect(state.current.gainDb).toBe(18);
+    expect(state.current.iso).toBe(400);
+  });
+
+  it("relayPanelSyncPatch merges ndFilterStops and ndFilterDisplayMode", () => {
+    const state = new CameraState();
+    state.relayPanelSyncPatch({ ndFilterStops: 2.4, ndFilterDisplayMode: 1 });
+    expect(state.current.ndFilterStops).toBeCloseTo(2.4, 1);
+    expect(state.current.ndFilterDisplayMode).toBe(1);
+  });
+
+  it("applyRelayPanelSyncFromCommandBytes mirrors ND from forwarded joiner bytes", () => {
+    const state = new CameraState();
+    expect(state.applyRelayPanelSyncFromCommandBytes(commands.ndFilterStops(0.6, 2))).toBe(true);
+    expect(state.current.ndFilterStops).toBeCloseTo(0.6, 1);
+    expect(state.current.ndFilterDisplayMode).toBe(2);
   });
 
   it("ingests new Video params (dynamic range, sharpening, display LUT, exposure us)", () => {

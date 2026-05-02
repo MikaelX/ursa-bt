@@ -380,12 +380,13 @@ export const commands = {
       payload: int8Payload(on ? 1 : 0),
     }),
 
-  ndFilterStops: (stops: number) =>
+  /** @param displayMode 0 = stops, 1 = density, 2 = transmittance (manual reference on body). */
+  ndFilterStops: (stops: number, displayMode = 0) =>
     encodeConfigurationCommand({
       category: 1,
       parameter: 16,
       dataType: CameraControlDataType.Fixed16,
-      payload: fixed16Payload(clamp(stops, 0, 6)),
+      payload: fixed16Payload(clamp(stops, 0, 6), clamp(Math.round(displayMode), 0, 2)),
     }),
 
   ndFilterDisplayMode: (mode: number) =>

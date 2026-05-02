@@ -127,7 +127,7 @@ async function readJson(req: IncomingMessage): Promise<unknown> {
   }
 }
 
-function send(res: ServerResponse, status: number, body: unknown): void {
+function send(res: ServerResponse, status: number, body: unknown, extraHeaders?: Record<string, string>): void {
   const payload = body === undefined ? "" : JSON.stringify(body);
   res.writeHead(status, {
     "content-type": "application/json",
@@ -135,6 +135,7 @@ function send(res: ServerResponse, status: number, body: unknown): void {
     "access-control-allow-methods": "GET,PUT,POST,DELETE,OPTIONS",
     "access-control-allow-headers": "content-type",
     "content-length": Buffer.byteLength(payload),
+    ...extraHeaders,
   });
   res.end(payload);
 }
@@ -162,7 +163,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
   if ((match = url.match(ROUTES.banks)) && method === "GET") {
     const file = await getBanks(decodeURIComponent(match[1]!));
-    send(res, 200, file);
+    send(res, 200, file, { "cache-control": "no-store" });
     return;
   }
 

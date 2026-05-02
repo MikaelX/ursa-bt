@@ -94,6 +94,23 @@ export function decodeCameraStatusDataView(value: DataView): CameraStatus {
   return decodeCameraStatusPayload(payload);
 }
 
+/** Plain copy of status fields for JSON relay (`panel_sync`, bootstrap) — no shared refs. */
+export function cameraStatusForRelayWire(status: CameraStatus): CameraStatus {
+  return {
+    raw: status.raw,
+    powerOn: status.powerOn,
+    connected: status.connected,
+    paired: status.paired,
+    versionsVerified: status.versionsVerified,
+    initialPayloadReceived: status.initialPayloadReceived,
+    cameraReady: status.cameraReady,
+    labels: [...status.labels],
+    payloadHex: status.payloadHex,
+    ...(status.trailingPayloadHex !== undefined ? { trailingPayloadHex: status.trailingPayloadHex } : {}),
+    statusByteReservedBits: status.statusByteReservedBits,
+  };
+}
+
 /** One debug log line: known flags, full hex, reserved bits, trailing bytes note. */
 export function formatCameraStatusLogLine(status: CameraStatus): string {
   const head = `Status 0x${status.raw.toString(16).padStart(2, "0")}: ${status.labels.join(", ") || "None"}`;

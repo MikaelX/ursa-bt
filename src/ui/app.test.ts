@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, type CameraClient } from "./app";
-import { commands } from "../blackmagic/protocol";
+import { commands, decodeConfigurationPacket } from "../blackmagic/protocol";
 import { emptyBanksFile, type Bank, type BanksFile } from "../banks/bank";
 import type { BanksApi } from "../banks/banksClient";
+import { formatNd } from "./panel";
 
 function createFakeBanks(): BanksApi & { state: BanksFile } {
   const state = emptyBanksFile();
@@ -27,11 +28,12 @@ function createFakeBanks(): BanksApi & { state: BanksFile } {
   };
 }
 
-function createFakeClient(): CameraClient {
+function createFakeClient(options?: { deviceName?: string }): CameraClient {
   let autoReconnect = true;
   const setAutoReconnect = vi.fn((value: boolean) => {
     autoReconnect = value;
   });
+  const deviceName = options?.deviceName ?? "URSA Broadcast";
 
   return {
     isSupported: true,
@@ -41,7 +43,7 @@ function createFakeClient(): CameraClient {
     },
     connect: vi.fn(async () => ({
       deviceId: "camera-1",
-      deviceName: "URSA Broadcast",
+      deviceName,
       connected: true,
     })),
     disconnect: vi.fn(),
@@ -83,7 +85,9 @@ describe("createApp", () => {
     await flushPromises();
 
     expect(client.connect).toHaveBeenCalledOnce();
-    expect(root.querySelector("[data-connection]")?.textContent).toContain("URSA Broadcast");
+    expect(root.querySelector("[data-connection]")?.textContent).toBe("");
+    expect(root.querySelector<HTMLElement>("[data-connection]")?.hidden).toBe(true);
+    expect(root.querySelector("[data-camera-product]")?.textContent).toBe("URSA Broadcast");
     expect(root.querySelector<HTMLButtonElement>("[data-record-start]")?.disabled).toBe(false);
   });
 
@@ -396,7 +400,18 @@ describe("createApp", () => {
     expect(client.writeCommand).toHaveBeenCalledWith(commands.whiteBalance(5600, -5));
   });
 
-  it("audio mini-faders send L/R input level commands and ND stepper sends ND command", async () => {
+  it("formatNd uses URSA dial labels CLR 2 3 4 and one decimal off-ladder", () => {
+    expect(formatNd(undefined)).toBe("--");
+    expect(formatNd(0)).toBe("CLR");
+    expect(formatNd(1)).toBe("2");
+    expect(formatNd(2)).toBe("3");
+    expect(formatNd(4)).toBe("4");
+    expect(formatNd(4.02)).toBe("4");
+    expect(formatNd(3)).toBe("3.0");
+    expect(formatNd(2.05)).toBe("3");
+  });
+
+  it("audio mini-faders send L/R input level commands and ND stepper steps URSA ladder", async () => {
     click(root.querySelector("[data-connect-toggle]")!);
     await flushPromises();
 
@@ -429,7 +444,34 @@ describe("createApp", () => {
       return p[4] === 2 && p[5] === 5;
     });
     expect(audioLR.length).toBeGreaterThanOrEqual(2);
-    expect(client.writeCommand).toHaveBeenCalledWith(commands.ndFilterStops(0.6));
+  });
+
+  it("ND stepper on URSA updates local state without BLE ND command", async () => {
+    click(root.querySelector("[data-connect-toggle]")!);
+    await flushPromises();
+
+    click(root.querySelector('[data-stepper-up="nd"]')!);
+    await flushPromises();
+
+    const ndPackets = (client.writeCommand as ReturnType<typeof vi.fn>).mock.calls.filter((args) => {
+      const d = decodeConfigurationPacket(args[0] as Uint8Array);
+      return d?.category === 1 && d.parameter === 16;
+    });
+    expect(ndPackets.length).toBe(0);
+  });
+
+  it("ND stepper on non-URSA sends BLE ND command", async () => {
+    const root2 = document.createElement("div");
+    const client2 = createFakeClient({ deviceName: "Blackmagic Studio Camera 4K" });
+    const banks2 = createFakeBanks();
+    createApp(root2, { client: client2, banks: banks2 });
+    click(root2.querySelector("[data-connect-toggle]")!);
+    await flushPromises();
+
+    click(root2.querySelector('[data-stepper-up="nd"]')!);
+    await flushPromises();
+
+    expect(client2.writeCommand).toHaveBeenCalledWith(commands.ndFilterStops(1, 0));
   });
 
   it("STORE arms then saves the current snapshot to a bank slot", async () => {
@@ -515,9 +557,33 @@ describe("createApp", () => {
     knob.setPointerCapture = () => undefined;
     knob.releasePointerCapture = () => undefined;
 
-    knob.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 1, clientX: 40, clientY: 20, bubbles: true }));
-    knob.dispatchEvent(new PointerEvent("pointermove", { pointerId: 1, clientX: 20, clientY: 40, bubbles: true }));
-    knob.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1, clientX: 20, clientY: 40, bubbles: true }));
+    knob.dispatchEvent(
+      new PointerEvent("pointerdown", {
+        pointerId: 1,
+        pointerType: "touch",
+        clientX: 40,
+        clientY: 20,
+        bubbles: true,
+      }),
+    );
+    knob.dispatchEvent(
+      new PointerEvent("pointermove", {
+        pointerId: 1,
+        pointerType: "touch",
+        clientX: 20,
+        clientY: 40,
+        bubbles: true,
+      }),
+    );
+    knob.dispatchEvent(
+      new PointerEvent("pointerup", {
+        pointerId: 1,
+        pointerType: "touch",
+        clientX: 20,
+        clientY: 40,
+        bubbles: true,
+      }),
+    );
 
     await new Promise((resolve) => setTimeout(resolve, 80));
 
@@ -526,6 +592,62 @@ describe("createApp", () => {
       return packet[4] === 8 && packet[5] === 0;
     });
     expect(liftCalls.length).toBeGreaterThan(0);
+  });
+
+  it("mouse drag on a paint knob sweeps value via vertical motion (full span in 180px)", async () => {
+    click(root.querySelector("[data-connect-toggle]")!);
+    await flushPromises();
+    (client.writeCommand as ReturnType<typeof vi.fn>).mockClear();
+
+    const cell = root.querySelector<HTMLElement>(
+      '[data-paint-cell][data-group="lift"][data-channel="luma"]',
+    )!;
+    const knob = cell.querySelector<HTMLElement>("[data-knob]")!;
+    knob.setPointerCapture = () => undefined;
+    knob.releasePointerCapture = () => undefined;
+
+    const y0 = 300;
+    const fullSpanPx = 180;
+    knob.dispatchEvent(
+      new PointerEvent("pointerdown", {
+        pointerId: 2,
+        pointerType: "mouse",
+        button: 0,
+        clientX: 50,
+        clientY: y0,
+        bubbles: true,
+      }),
+    );
+    knob.dispatchEvent(
+      new PointerEvent("pointermove", {
+        pointerId: 2,
+        pointerType: "mouse",
+        button: 0,
+        clientX: 50,
+        clientY: y0 - fullSpanPx,
+        bubbles: true,
+      }),
+    );
+    knob.dispatchEvent(
+      new PointerEvent("pointerup", {
+        pointerId: 2,
+        pointerType: "mouse",
+        button: 0,
+        clientX: 50,
+        clientY: y0 - fullSpanPx,
+        bubbles: true,
+      }),
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    const expectedMax = commands.lift(0, 0, 0, 2);
+    const matched = (client.writeCommand as ReturnType<typeof vi.fn>).mock.calls.some((call) => {
+      const packet = call[0] as Uint8Array;
+      if (packet.length !== expectedMax.length) return false;
+      return packet.every((b, i) => b === expectedMax[i]!);
+    });
+    expect(matched).toBe(true);
   });
 
   it("clicking an empty bank logs and does not write commands", async () => {

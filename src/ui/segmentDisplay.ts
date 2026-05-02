@@ -3,6 +3,16 @@
  * Mirrors the pattern demo in src/patterns/page.ts.
  */
 
+/**
+ * Fixed-width string for 7-seg slots: optional leading spaces, then sign (space or `-`)
+ * and `abs.toFixed(2)`, so switching between negative and positive values does not change layout.
+ */
+export function formatSegSignedFixed2(value: number, totalWidth = 6): string {
+  const sign = value < 0 ? "-" : " ";
+  const body = Math.abs(value).toFixed(2);
+  return (sign + body).padStart(totalWidth, " ");
+}
+
 function makeDigit(): HTMLElement {
   const d = document.createElement("span");
   d.className = "bm-seg__digit";
@@ -17,10 +27,18 @@ function makeDigit(): HTMLElement {
 }
 
 function paintDigit(digit: HTMLElement, ch: string, dpOn: boolean): void {
-  digit.dataset.value = ch;
   digit.dataset.dp = dpOn ? "true" : "false";
   const ghost = digit.querySelector<HTMLElement>(".bm-seg__ghost");
   const value = digit.querySelector<HTMLElement>(".bm-seg__value");
+  if (ch === " ") {
+    digit.dataset.value = "";
+    digit.classList.add("bm-seg__digit--blank");
+    if (ghost) ghost.textContent = "8";
+    if (value) value.textContent = "";
+    return;
+  }
+  digit.dataset.value = ch;
+  digit.classList.remove("bm-seg__digit--blank");
   if (ghost) ghost.textContent = dpOn ? "8." : "8";
   if (value) value.textContent = dpOn ? `${ch}.` : ch;
 }

@@ -1,5 +1,5 @@
 import type { CameraSnapshot } from "../blackmagic/cameraState";
-import { populateSegSlots } from "./segmentDisplay";
+import { formatSegSignedFixed2, populateSegSlots } from "./segmentDisplay";
 
 export const CAMERA_COUNT = 8;
 export const PAINT_CHANNELS = ["red", "green", "blue", "luma"] as const;
@@ -10,7 +10,7 @@ export type PaintGroup = (typeof PAINT_GROUPS)[number];
 export const COLOR_GROUP_RANGES: Record<PaintGroup, { min: number; max: number; default: number }> = {
   lift: { min: -2, max: 2, default: 0 },
   gamma: { min: -4, max: 4, default: 0 },
-  gain: { min: 0, max: 16, default: 1 },
+  gain: { min: 0, max: 16, default: 0 },
 };
 
 function renderSegReadout(
@@ -69,6 +69,35 @@ function renderStepper(stepperId: string, label: string, readoutKey: string, _de
       <span class="stepper-label">${label}</span>
     </div>
   `;
+}
+
+/** URSA Broadcast ND: dial 1 = CLR, 2 / 3 / 4 on body; same BLE stop ladder 0, 1, 2, 4. */
+export const ND_URSA_STEPS = [
+  { label: "CLR", stops: 0 },
+  { label: "2", stops: 1 },
+  { label: "3", stops: 2 },
+  { label: "4", stops: 4 },
+] as const;
+
+const ND_URSA_TOL = 0.11;
+
+export function stepNdUrsa(current: number | undefined, direction: 1 | -1): number {
+  const cur = current ?? 0;
+  let idx = ND_URSA_STEPS.findIndex((s) => Math.abs(s.stops - cur) <= ND_URSA_TOL);
+  if (idx === -1) {
+    let best = 0;
+    let bestD = Infinity;
+    for (let i = 0; i < ND_URSA_STEPS.length; i++) {
+      const d = Math.abs(ND_URSA_STEPS[i]!.stops - cur);
+      if (d < bestD || (d === bestD && ND_URSA_STEPS[i]!.stops < ND_URSA_STEPS[best]!.stops)) {
+        bestD = d;
+        best = i;
+      }
+    }
+    idx = best;
+  }
+  idx = Math.max(0, Math.min(ND_URSA_STEPS.length - 1, idx + direction));
+  return ND_URSA_STEPS[idx]!.stops;
 }
 
 function renderColorGroup(group: PaintGroup, label: string, min: number, max: number, defaultValue: number): string {
@@ -357,13 +386,7 @@ export const VIEW_IDS = ["connect", "settings", "iris", "audio", "video", "color
 export type ViewId = (typeof VIEW_IDS)[number];
 
 /** Views where the persistent scene file bar is visible above the bottom nav. */
-export const SCENE_BAR_VIEWS: ReadonlySet<ViewId> = new Set<ViewId>([
-  "settings",
-  "iris",
-  "audio",
-  "video",
-  "color",
-]);
+export const SCENE_BAR_VIEWS: ReadonlySet<ViewId> = new Set<ViewId>(["settings"]);
 
 const VIEW_LABELS: Record<ViewId, string> = {
   connect: "Connect",
@@ -429,7 +452,10 @@ function renderAppHeader(bleAvailable: boolean): string {
     <header class="app-header" data-app-header>
       <div class="app-header-brand">
         <span class="app-header-eyebrow">BM Camera</span>
-        <p data-connection class="pill app-header-pill">Disconnected</p>
+        <div class="app-header-live">
+          <span class="app-header-camera-product app-header-camera-badge" data-camera-product hidden aria-label="Camera model"></span>
+          <p data-connection class="app-header-pill app-header-connection-meta">Disconnected</p>
+        </div>
       </div>
       <div class="app-header-meta">
         <span class="app-header-cam" data-cam-badge aria-label="Selected camera" role="status">
@@ -529,7 +555,7 @@ function renderSettingsView(): string {
             ${renderStepper("gain", "Master Gain", "gain", "0.0")}
             ${renderStepper("iso", "ISO", "iso", "----")}
             ${renderStepper("shutter", "Shutter", "shutter", "0180")}
-            ${renderStepper("nd", "ND Stops", "nd", "--")}
+            ${renderStepper("nd", "ND", "nd", "CLR")}
           </div>
           <div class="settings-buttons" role="group" aria-label="Auto exposure and program keys">
             <div class="stepper-cell auto-exp-cell">
@@ -540,14 +566,18 @@ function renderSettingsView(): string {
               <span class="stepper-label">Auto Exp</span>
             </div>
             <div class="stepper-cell unit-btn-cell">
-              <span class="unit-btn-indicator">ABS</span>
-              <span class="unit-btn-led" data-wb-led></span>
+              <div class="unit-btn-head">
+                <span class="unit-btn-led" data-wb-led aria-hidden="true"></span>
+                <span class="unit-btn-indicator">ABS</span>
+              </div>
               <button class="bm-btn unit-btn" type="button" data-video-set-auto-wb data-control aria-label="Set auto white balance">W/B</button>
               <span class="stepper-label">White Bal</span>
             </div>
             <div class="stepper-cell unit-btn-cell">
-              <span class="unit-btn-indicator">BARS</span>
-              <span class="unit-btn-led" data-bars-led></span>
+              <div class="unit-btn-head">
+                <span class="unit-btn-led" data-bars-led aria-hidden="true"></span>
+                <span class="unit-btn-indicator">BARS</span>
+              </div>
               <button
                 class="bm-btn unit-btn"
                 type="button"
@@ -558,8 +588,10 @@ function renderSettingsView(): string {
               <span class="stepper-label">Color Bars</span>
             </div>
             <div class="stepper-cell unit-btn-cell">
-              <span class="unit-btn-indicator">RTN</span>
-              <span class="unit-btn-led" data-program-return-led></span>
+              <div class="unit-btn-head">
+                <span class="unit-btn-led" data-program-return-led aria-hidden="true"></span>
+                <span class="unit-btn-indicator">RTN</span>
+              </div>
               <button
                 class="bm-btn unit-btn"
                 type="button"
@@ -712,7 +744,7 @@ function renderIrisView(): string {
         <div class="iris-info-strip" aria-label="Camera info">
           <span><em>FORMAT</em><b data-readout="format">---</b></span>
           <span><em>CODEC</em><b data-readout="codec">---</b></span>
-          <span><em>ND</em><b data-readout="ndReadout">--</b></span>
+          <span data-nd-readout-wrap><em>ND</em><b data-readout="ndReadout">--</b></span>
           <span><em>TINT</em><b data-readout="tintReadout">0</b></span>
         </div>
       </div>
@@ -895,7 +927,7 @@ function renderColorView(): string {
         <div class="card-body color-body">
           ${renderColorGroup("lift", "Lift", -2, 2, 0)}
           ${renderColorGroup("gamma", "Gamma", -4, 4, 0)}
-          ${renderColorGroup("gain", "Gain", 0, 16, 1)}
+          ${renderColorGroup("gain", "Gain", 0, 16, 0)}
           <div class="color-extras">
             ${renderColorHFader("contrast-pivot", "Contrast pivot", 0, 1, 0.5, "contrastPivot")}
             ${renderColorHFader("contrast-adjust", "Contrast adjust", 0, 2, 1, "contrastAdjust")}
@@ -947,8 +979,8 @@ function renderSceneBar(): string {
                 aria-label="Scene file ${slot + 1}"
                 aria-pressed="false"
               >
+                <span class="scene-bank-led" aria-hidden="true"></span>
                 <span class="scene-bank-label">${slot + 1}</span>
-                <span class="scene-bank-led"></span>
               </button>
             `;
           }).join("")}
@@ -1100,6 +1132,50 @@ export function isViewId(value: string | null | undefined): value is ViewId {
   return value !== null && value !== undefined && (VIEW_IDS as readonly string[]).includes(value);
 }
 
+/** Product label from BLE / GATT name (URSA Broadcast spelled out; other lines stay short). */
+/** True when the paired BLE name is a URSA family body (ND is mechanical / not reliable over Bluetooth). */
+export function isUrsaCameraName(raw: string | undefined): boolean {
+  if (!raw?.trim()) return false;
+  return raw.toUpperCase().includes("URSA");
+}
+
+export function formatCameraProductLabel(raw: string | undefined): string {
+  if (!raw?.trim()) return "";
+  const u = raw.toUpperCase();
+  if (u.includes("URSA")) {
+    if (u.includes("MINI")) return "URSA MINI";
+    if (u.includes("BROADCAST")) return "URSA Broadcast";
+    return "URSA";
+  }
+  if (u.includes("POCKET")) return "POCKET";
+  if (u.includes("PYXIS")) return "PYXIS";
+  if (u.includes("STUDIO")) return "STUDIO";
+  const skip = new Set(["BLACKMAGIC", "BMD", "DESIGN", "CAMERA"]);
+  const tokens = raw.split(/[\s/-]+/).filter((t) => t.length > 0 && !skip.has(t.toUpperCase()));
+  const first = tokens[0];
+  if (!first) return "CAMERA";
+  return first.toUpperCase().slice(0, 14);
+}
+
+export function updateAppHeaderCameraProduct(root: HTMLElement, rawName: string | undefined): void {
+  const el = root.querySelector<HTMLElement>("[data-camera-product]");
+  if (!el) return;
+  const trimmed = rawName?.trim();
+  if (!trimmed) {
+    el.hidden = true;
+    el.textContent = "";
+    el.removeAttribute("title");
+    return;
+  }
+  el.textContent = formatCameraProductLabel(trimmed) || "CAMERA";
+  el.title = trimmed;
+  el.hidden = false;
+}
+
+function ndManualReferenceDisplay(mode: number | undefined): boolean {
+  return mode === 1 || mode === 2;
+}
+
 export function updatePanel(
   root: HTMLElement,
   snapshot: CameraSnapshot,
@@ -1119,6 +1195,30 @@ export function updatePanel(
   setReadout(root, "iso", formatIso(snapshot.iso));
   setReadout(root, "nd", formatNd(snapshot.ndFilterStops));
   setReadout(root, "ndReadout", formatNd(snapshot.ndFilterStops));
+  const ndManualRef = ndManualReferenceDisplay(snapshot.ndFilterDisplayMode);
+  const ursaNd = isUrsaCameraName(snapshot.deviceName);
+  const ndSeg = root.querySelector<HTMLElement>('[data-readout="nd"]');
+  if (ndSeg) {
+    if (ursaNd) {
+      ndSeg.classList.remove("bm-seg--green", "bm-seg--yellow");
+      ndSeg.classList.add("bm-seg--orange");
+    } else {
+      ndSeg.classList.remove("bm-seg--orange");
+      ndSeg.classList.toggle("bm-seg--green", !ndManualRef);
+      ndSeg.classList.toggle("bm-seg--yellow", ndManualRef);
+    }
+  }
+  const ndWrap = root.querySelector<HTMLElement>("[data-nd-readout-wrap]");
+  if (ndWrap) {
+    if (ursaNd) {
+      ndWrap.classList.remove("iris-info-strip__nd--manual-ref");
+      ndWrap.classList.add("iris-info-strip__nd--ursa-manual");
+    } else {
+      ndWrap.classList.remove("iris-info-strip__nd--ursa-manual");
+      ndWrap.classList.toggle("iris-info-strip__nd--manual-ref", ndManualRef);
+    }
+  }
+
   setReadout(root, "format", formatRecordingFormat(snapshot));
   setReadout(root, "codec", formatCodec(snapshot.codec));
 
@@ -1134,6 +1234,7 @@ export function updatePanel(
   updateUnitOutputs(root, snapshot);
   updateLeds(root, snapshot, transport);
   updateRecording(root, snapshot.recording);
+  updateAppHeaderCameraProduct(root, snapshot.deviceName);
 }
 
 export interface SceneBanksUiState {
@@ -1149,10 +1250,24 @@ export function updateSceneBanks(root: HTMLElement, ui: SceneBanksUiState): void
     const slot = Number(button.dataset.bankSlot);
     const filled = Boolean(ui.filledSlots[slot]);
     const loaded = ui.loadedSlot === slot;
+    const dirty = loaded && Boolean(ui.dirty);
     button.classList.toggle("filled", filled);
     button.classList.toggle("loaded", loaded);
-    button.classList.toggle("dirty", loaded && Boolean(ui.dirty));
+    button.classList.toggle("dirty", dirty);
     button.setAttribute("aria-pressed", loaded ? "true" : "false");
+    const n = slot + 1;
+    const title = loaded
+      ? dirty
+        ? `Scene ${n} (loaded, unsaved changes)`
+        : `Scene ${n} (loaded)`
+      : filled
+        ? `Scene ${n} (saved)`
+        : `Scene ${n} (empty)`;
+    button.title = title;
+    button.setAttribute(
+      "aria-label",
+      loaded ? `Scene file ${n}, loaded${dirty ? ", modified since load" : ""}` : `Scene file ${n}, ${filled ? "saved" : "empty"}`,
+    );
   });
 
   const storeBtn = root.querySelector<HTMLButtonElement>("[data-scene-store]");
@@ -1313,7 +1428,7 @@ function syncHorizontalFader(
 ): void {
   const fader = root.querySelector<HTMLElement>(`[data-hfader="${attr}"]`);
   const handle = fader?.querySelector<HTMLElement>("[data-hfader-handle]");
-  setReadout(root, readoutKey, value.toFixed(2));
+  setReadout(root, readoutKey, formatSegSignedFixed2(value));
   if (!fader || !handle) return;
   if (fader.dataset.dragging === "true") return;
   positionHorizontalFader(fader, handle, value);
@@ -1338,6 +1453,16 @@ export function readFaderRange(el: HTMLElement): FaderRange {
 /** Map value -> [0,1] where the fader's default sits at exactly 0.5. */
 export function valueToCenteredNorm(value: number, range: FaderRange): number {
   const { min, max, default: def } = range;
+  const span = max - min;
+  if (span <= 0) return 0.5;
+  // Default at an endpoint (e.g. gain min=default=0): map [min,max] linearly to fader travel
+  // so the neutral value sits at the physical min/max, not at the bipolar "0.5" detent.
+  if (def <= min) {
+    return Math.max(0, Math.min(1, (value - min) / span));
+  }
+  if (def >= max) {
+    return Math.max(0, Math.min(1, (value - min) / span));
+  }
   if (value >= def) {
     const aboveSpan = max - def || 1;
     return 0.5 + 0.5 * Math.max(0, Math.min(1, (value - def) / aboveSpan));
@@ -1350,6 +1475,11 @@ export function valueToCenteredNorm(value: number, range: FaderRange): number {
 export function centeredNormToValue(norm: number, range: FaderRange): number {
   const n = Math.max(0, Math.min(1, norm));
   const { min, max, default: def } = range;
+  const span = max - min;
+  if (span <= 0) return def;
+  if (def <= min || def >= max) {
+    return min + n * span;
+  }
   if (n >= 0.5) return def + ((n - 0.5) / 0.5) * (max - def);
   return def - ((0.5 - n) / 0.5) * (def - min);
 }
@@ -1372,7 +1502,7 @@ export function positionHorizontalFader(fader: HTMLElement, handle: HTMLElement,
 export const PAINT_RANGE: Record<PaintGroup, { min: number; max: number; default: number }> = {
   lift: { min: -2, max: 2, default: 0 },
   gamma: { min: -4, max: 4, default: 0 },
-  gain: { min: 0, max: 16, default: 1 },
+  gain: { min: 0, max: 16, default: 0 },
 };
 
 const KNOB_MAX_ANGLE_DEG = 135;
@@ -1412,13 +1542,13 @@ function updatePaintKnobs(root: HTMLElement, snapshot: CameraSnapshot): void {
 
 export function writePaintSegReadout(readout: HTMLElement, value: number): void {
   const slots = readout.querySelector<HTMLElement>("[data-seg-slots]");
-  const text = value.toFixed(2);
+  const text = formatSegSignedFixed2(value);
   if (slots) {
     populateSegSlots(slots, text);
-    readout.setAttribute("aria-label", text);
+    readout.setAttribute("aria-label", text.trim());
     return;
   }
-  readout.textContent = text;
+  readout.textContent = text.trim();
 }
 
 function updateLeds(
@@ -1572,8 +1702,10 @@ function formatIso(iso: number | undefined): string {
 
 export function formatNd(stops: number | undefined): string {
   if (stops === undefined || Number.isNaN(stops)) return "--";
-  if (stops <= 0.05) return "CLR";
-  return `${stops.toFixed(1)}`;
+  for (const p of ND_URSA_STEPS) {
+    if (Math.abs(stops - p.stops) <= ND_URSA_TOL) return p.label;
+  }
+  return (Math.round(stops * 10) / 10).toFixed(1);
 }
 
 function setMiniFaderMirror(root: HTMLElement, faderAttr: string, readout: string, value: number | undefined): void {
@@ -1622,22 +1754,22 @@ function updateAudioCard(root: HTMLElement, snapshot: CameraSnapshot): void {
 
 
 function updateUnitOutputs(root: HTMLElement, snapshot: CameraSnapshot): void {
-  const bars = root.querySelector<HTMLButtonElement>("[data-color-bars]");
-  if (bars) {
-    const on = snapshot.unitOutputs?.colorBars === true;
-    bars.classList.toggle("active", on);
-    bars.setAttribute("aria-pressed", on ? "true" : "false");
-  }
-  const pgmRet = root.querySelector<HTMLButtonElement>("[data-program-return-feed]");
-  if (pgmRet) {
-    const on = snapshot.unitOutputs?.programReturnFeed === true;
-    pgmRet.classList.toggle("active", on);
-    pgmRet.setAttribute("aria-pressed", on ? "true" : "false");
-  }
-  root.querySelector<HTMLElement>("[data-bars-led]")?.classList.toggle("on", snapshot.unitOutputs?.colorBars === true);
-  root
-    .querySelector<HTMLElement>("[data-program-return-led]")
-    ?.classList.toggle("on", snapshot.unitOutputs?.programReturnFeed === true);
+  const barsOn = snapshot.unitOutputs?.colorBars === true;
+  root.querySelectorAll<HTMLButtonElement>("[data-color-bars]").forEach((bars) => {
+    bars.classList.toggle("active", barsOn);
+    bars.setAttribute("aria-pressed", barsOn ? "true" : "false");
+  });
+  const pgmOn = snapshot.unitOutputs?.programReturnFeed === true;
+  root.querySelectorAll<HTMLButtonElement>("[data-program-return-feed]").forEach((pgmRet) => {
+    pgmRet.classList.toggle("active", pgmOn);
+    pgmRet.setAttribute("aria-pressed", pgmOn ? "true" : "false");
+  });
+  root.querySelectorAll<HTMLElement>("[data-bars-led]").forEach((el) => {
+    el.classList.toggle("on", barsOn);
+  });
+  root.querySelectorAll<HTMLElement>("[data-program-return-led]").forEach((el) => {
+    el.classList.toggle("on", pgmOn);
+  });
 }
 
 function updateVideoCard(root: HTMLElement, snapshot: CameraSnapshot): void {
@@ -1652,6 +1784,12 @@ function updateVideoCard(root: HTMLElement, snapshot: CameraSnapshot): void {
   if (lutEnabled && snapshot.displayLut?.enabled !== undefined && document.activeElement !== lutEnabled) {
     lutEnabled.checked = snapshot.displayLut.enabled;
   }
+
+  const autoWbOn = snapshot.autoWhiteBalanceActive === true;
+  root.querySelectorAll<HTMLButtonElement>("[data-video-set-auto-wb]").forEach((button) => {
+    button.classList.toggle("active", autoWbOn);
+    button.setAttribute("aria-pressed", autoWbOn ? "true" : "false");
+  });
 
   setMiniFaderMirror(root, "tally-master", "tallyMaster", snapshot.tally?.brightness?.master);
   setMiniFaderMirror(root, "tally-front", "tallyFront", snapshot.tally?.brightness?.front);

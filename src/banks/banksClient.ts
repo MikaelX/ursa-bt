@@ -12,7 +12,9 @@ export class HttpBanksApi implements BanksApi {
   constructor(private readonly baseUrl = "/api") {}
 
   async load(deviceId: string): Promise<BanksFile> {
-    const res = await fetch(`${this.baseUrl}/cameras/${encodeURIComponent(deviceId)}/banks`);
+    const res = await fetch(`${this.baseUrl}/cameras/${encodeURIComponent(deviceId)}/banks`, {
+      cache: "no-store",
+    });
     if (!res.ok) throw new Error(`Banks load failed: HTTP ${res.status}`);
     return (await res.json()) as BanksFile;
   }

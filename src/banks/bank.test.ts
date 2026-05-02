@@ -88,6 +88,7 @@ describe("applyBankToCamera", () => {
     const snap = snapshotFixture();
     snap.cameraNumber = 4;
     snap.ndFilterStops = 1.8;
+    snap.ndFilterDisplayMode = 2;
     snap.audio = {
       micLevel: 0.6,
       headphoneLevel: 0.4,
@@ -101,6 +102,7 @@ describe("applyBankToCamera", () => {
     const bank = buildBankFromSnapshot(snap);
     expect(bank.cameraNumber).toBe(4);
     expect(bank.ndFilterStops).toBeCloseTo(1.8);
+    expect(bank.ndFilterDisplayMode).toBe(2);
     expect(bank.audio?.micLevel).toBeCloseTo(0.6);
     expect(bank.audio?.inputLevels).toEqual({ left: 0.55, right: 0.45 });
     expect(bank.audio?.inputType).toBe(2);
@@ -140,7 +142,7 @@ describe("applyBankToCamera", () => {
     expect(decoded.find((d) => d.category === 2 && d.parameter === 3)).toBeDefined();
     expect(decoded.find((d) => d.category === 2 && d.parameter === 4)?.values).toEqual([1]);
     expect(decoded.find((d) => d.category === 2 && d.parameter === 5)?.values).toHaveLength(2);
-    expect(decoded.find((d) => d.category === 1 && d.parameter === 16)).toBeDefined();
+    expect(decoded.find((d) => d.category === 1 && d.parameter === 16)?.values).toHaveLength(2);
   });
 
   it("matches commands.* output exactly when the bank holds the same value", async () => {
@@ -158,5 +160,27 @@ describe("applyBankToCamera", () => {
     await applyBankToCamera({ writeCommand }, bank);
 
     expect(writeCommand).toHaveBeenCalledWith(commands.gain(0));
+  });
+
+  it("applyBankToCamera skips ND over BLE when skipNdBle is set", async () => {
+    const bank: Bank = {
+      color: {
+        lift: { red: 0, green: 0, blue: 0, luma: 0 },
+        gamma: { red: 0, green: 0, blue: 0, luma: 0 },
+        gain: { red: 1, green: 1, blue: 1, luma: 1 },
+        offset: { red: 0, green: 0, blue: 0, luma: 0 },
+      },
+      ndFilterStops: 2,
+    };
+
+    const writeCommand = vi.fn(async (_packet: Uint8Array) => undefined);
+    await applyBankToCamera({ writeCommand }, bank, { skipNdBle: true });
+
+    const payloads = writeCommand.mock.calls.map((args) => args[0]);
+    const decoded = payloads
+      .map((packet) => decodeConfigurationPacket(packet))
+      .filter((d): d is NonNullable<typeof d> => d !== undefined);
+
+    expect(decoded.find((d) => d.category === 1 && d.parameter === 16)).toBeUndefined();
   });
 });
