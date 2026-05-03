@@ -1,10 +1,17 @@
-import type { Bank, BanksFile } from "./bank";
-import { emptyBanksFile } from "./bank";
+import type { Bank, BanksFile, GlobalScenesFile } from "./bank";
+import { emptyBanksFile, emptyGlobalScenesFile } from "./bank";
+
+export type SaveGlobalSceneResponse = { camera: BanksFile; globalBanks: Array<Bank | null> };
 
 export interface BanksApi {
   load(deviceId: string): Promise<BanksFile>;
+  loadGlobalScenes(): Promise<GlobalScenesFile>;
   saveBank(deviceId: string, slot: number, bank: Bank): Promise<BanksFile>;
-  setLoadedSlot(deviceId: string, slot: number | null): Promise<BanksFile>;
+  saveGlobalScene(deviceId: string, slot: number, bank: Bank): Promise<SaveGlobalSceneResponse>;
+  setLoadedScene(
+    deviceId: string,
+    update: { slot?: number | null; globalLoadedSlot?: number | null },
+  ): Promise<BanksFile>;
   saveLastState(deviceId: string, state: Bank): Promise<void>;
 }
 
@@ -17,6 +24,12 @@ export class HttpBanksApi implements BanksApi {
     });
     if (!res.ok) throw new Error(`Banks load failed: HTTP ${res.status}`);
     return (await res.json()) as BanksFile;
+  }
+
+  async loadGlobalScenes(): Promise<GlobalScenesFile> {
+    const res = await fetch(`${this.baseUrl}/global/scenes`, { cache: "no-store" });
+    if (!res.ok) throw new Error(`Global scenes load failed: HTTP ${res.status}`);
+    return (await res.json()) as GlobalScenesFile;
   }
 
   async saveBank(deviceId: string, slot: number, bank: Bank): Promise<BanksFile> {
@@ -32,16 +45,32 @@ export class HttpBanksApi implements BanksApi {
     return (await res.json()) as BanksFile;
   }
 
-  async setLoadedSlot(deviceId: string, slot: number | null): Promise<BanksFile> {
+  async saveGlobalScene(deviceId: string, slot: number, bank: Bank): Promise<SaveGlobalSceneResponse> {
+    const res = await fetch(
+      `${this.baseUrl}/cameras/${encodeURIComponent(deviceId)}/global-scenes/${slot}`,
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(bank),
+      },
+    );
+    if (!res.ok) throw new Error(`Global scene save failed: HTTP ${res.status}`);
+    return (await res.json()) as SaveGlobalSceneResponse;
+  }
+
+  async setLoadedScene(
+    deviceId: string,
+    update: { slot?: number | null; globalLoadedSlot?: number | null },
+  ): Promise<BanksFile> {
     const res = await fetch(
       `${this.baseUrl}/cameras/${encodeURIComponent(deviceId)}/loaded`,
       {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ slot }),
+        body: JSON.stringify(update),
       },
     );
-    if (!res.ok) throw new Error(`Loaded-slot save failed: HTTP ${res.status}`);
+    if (!res.ok) throw new Error(`Loaded-scene save failed: HTTP ${res.status}`);
     return (await res.json()) as BanksFile;
   }
 
@@ -62,10 +91,16 @@ export class NullBanksApi implements BanksApi {
   async load(): Promise<BanksFile> {
     return emptyBanksFile();
   }
+  async loadGlobalScenes(): Promise<GlobalScenesFile> {
+    return emptyGlobalScenesFile();
+  }
   async saveBank(_d: string, _s: number, _b: Bank): Promise<BanksFile> {
     return emptyBanksFile();
   }
-  async setLoadedSlot(): Promise<BanksFile> {
+  async saveGlobalScene(): Promise<SaveGlobalSceneResponse> {
+    return { camera: emptyBanksFile(), globalBanks: emptyGlobalScenesFile().banks };
+  }
+  async setLoadedScene(): Promise<BanksFile> {
     return emptyBanksFile();
   }
   async saveLastState(): Promise<void> {

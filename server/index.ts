@@ -4,6 +4,7 @@ import { dirname, extname, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   BANK_COUNT,
+  GLOBAL_SCENE_COUNT,
   emptyBanksFile,
   type Bank,
   type BanksFile,
@@ -39,6 +40,23 @@ const MIME_TYPES: Record<string, string> = {
 
 interface Database {
   cameras: Record<string, BanksFile>;
+  globalScenes: Array<Bank | null>;
+}
+
+function normalizeDatabase(db: Database): void {
+  if (!db.cameras) db.cameras = {};
+  if (!Array.isArray(db.globalScenes)) {
+    db.globalScenes = Array.from({ length: GLOBAL_SCENE_COUNT }, () => null);
+  }
+  while (db.globalScenes.length < GLOBAL_SCENE_COUNT) {
+    db.globalScenes.push(null);
+  }
+  if (db.globalScenes.length > GLOBAL_SCENE_COUNT) {
+    db.globalScenes = db.globalScenes.slice(0, GLOBAL_SCENE_COUNT);
+  }
+  for (const file of Object.values(db.cameras)) {
+    if (file.globalLoadedSlot === undefined) file.globalLoadedSlot = null;
+  }
 }
 
 let cache: Database | undefined;
@@ -50,8 +68,9 @@ async function readDb(): Promise<Database> {
     const raw = await readFile(DATA_FILE, "utf-8");
     cache = JSON.parse(raw) as Database;
   } catch {
-    cache = { cameras: {} };
+    cache = { cameras: {}, globalScenes: Array.from({ length: GLOBAL_SCENE_COUNT }, () => null) };
   }
+  normalizeDatabase(cache);
   return cache;
 }
 
@@ -82,23 +101,58 @@ async function saveBank(deviceId: string, slot: number, bank: Bank): Promise<Ban
   const file = db.cameras[deviceId] ?? emptyBanksFile();
   file.banks[slot] = bank;
   file.loadedSlot = slot;
+  file.globalLoadedSlot = null;
   file.updatedAt = Date.now();
   db.cameras[deviceId] = file;
   await persist();
   return file;
 }
 
-async function setLoadedSlot(deviceId: string, slot: number | null): Promise<BanksFile> {
-  if (slot !== null && (slot < 0 || slot >= BANK_COUNT)) {
-    throw new HttpError(400, `slot must be 0..${BANK_COUNT - 1} or null`);
-  }
+async function applyLoadedUpdate(deviceId: string, body: Record<string, unknown>): Promise<BanksFile> {
   const db = await readDb();
   const file = db.cameras[deviceId] ?? emptyBanksFile();
-  file.loadedSlot = slot;
+
+  if ("slot" in body) {
+    const slot = body.slot as number | null | undefined;
+    if (slot !== null && slot !== undefined && (typeof slot !== "number" || slot < 0 || slot >= BANK_COUNT)) {
+      throw new HttpError(400, `slot must be 0..${BANK_COUNT - 1} or null`);
+    }
+    file.loadedSlot = slot ?? null;
+    if (file.loadedSlot !== null) file.globalLoadedSlot = null;
+  }
+  if ("globalLoadedSlot" in body) {
+    const g = body.globalLoadedSlot as number | null | undefined;
+    if (g !== null && g !== undefined && (typeof g !== "number" || g < 0 || g >= GLOBAL_SCENE_COUNT)) {
+      throw new HttpError(400, `globalLoadedSlot must be 0..${GLOBAL_SCENE_COUNT - 1} or null`);
+    }
+    file.globalLoadedSlot = g ?? null;
+    if (file.globalLoadedSlot !== null) file.loadedSlot = null;
+  }
+
   file.updatedAt = Date.now();
   db.cameras[deviceId] = file;
   await persist();
   return file;
+}
+
+async function saveGlobalScene(deviceId: string, slot: number, bank: Bank): Promise<{ camera: BanksFile; globalBanks: Array<Bank | null> }> {
+  if (slot < 0 || slot >= GLOBAL_SCENE_COUNT) {
+    throw new HttpError(400, `global slot must be 0..${GLOBAL_SCENE_COUNT - 1}`);
+  }
+  const db = await readDb();
+  db.globalScenes[slot] = bank;
+  const file = db.cameras[deviceId] ?? emptyBanksFile();
+  file.globalLoadedSlot = slot;
+  file.loadedSlot = null;
+  file.updatedAt = Date.now();
+  db.cameras[deviceId] = file;
+  await persist();
+  return { camera: file, globalBanks: [...db.globalScenes] };
+}
+
+async function getGlobalScenes(): Promise<Array<Bank | null>> {
+  const db = await readDb();
+  return [...db.globalScenes];
 }
 
 async function saveLastState(deviceId: string, state: Bank): Promise<void> {
@@ -144,6 +198,8 @@ const ROUTES = {
   banks: /^\/api\/cameras\/([^/]+)\/banks$/,
   bankSlot: /^\/api\/cameras\/([^/]+)\/banks\/(\d+)$/,
   loaded: /^\/api\/cameras\/([^/]+)\/loaded$/,
+  globalScenes: /^\/api\/global\/scenes\/?$/,
+  cameraGlobalSceneSlot: /^\/api\/cameras\/([^/]+)\/global-scenes\/(\d+)$/,
   state: /^\/api\/cameras\/([^/]+)\/state$/,
   relaySessions: /^\/api\/relay\/sessions\/?$/,
 };
@@ -175,9 +231,22 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   }
 
   if ((match = url.match(ROUTES.loaded)) && method === "PUT") {
-    const body = (await readJson(req)) as { slot: number | null };
-    const file = await setLoadedSlot(decodeURIComponent(match[1]!), body?.slot ?? null);
+    const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+    const file = await applyLoadedUpdate(decodeURIComponent(match[1]!), body);
     send(res, 200, file);
+    return;
+  }
+
+  if (url.match(ROUTES.globalScenes) && method === "GET") {
+    const banks = await getGlobalScenes();
+    send(res, 200, { banks }, { "cache-control": "no-store" });
+    return;
+  }
+
+  if ((match = url.match(ROUTES.cameraGlobalSceneSlot)) && method === "PUT") {
+    const bank = (await readJson(req)) as Bank;
+    const payload = await saveGlobalScene(decodeURIComponent(match[1]!), Number(match[2]), bank);
+    send(res, 200, payload);
     return;
   }
 

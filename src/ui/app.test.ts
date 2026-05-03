@@ -1,25 +1,49 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, type CameraClient } from "./app";
 import { commands, decodeConfigurationPacket } from "../blackmagic/protocol";
-import { emptyBanksFile, type Bank, type BanksFile } from "../banks/bank";
+import { emptyBanksFile, emptyGlobalScenesFile, type Bank, type BanksFile } from "../banks/bank";
 import type { BanksApi } from "../banks/banksClient";
 import { formatNd } from "./panel";
 
-function createFakeBanks(): BanksApi & { state: BanksFile } {
+function createFakeBanks(): BanksApi & { state: BanksFile; globalBanks: Array<Bank | null> } {
   const state = emptyBanksFile();
+  const globalFile = emptyGlobalScenesFile();
+  const globalBanks = globalFile.banks;
   return {
     state,
+    globalBanks,
     async load() {
       return state;
+    },
+    async loadGlobalScenes() {
+      return { banks: [...globalBanks] };
     },
     async saveBank(_d: string, slot: number, bank: Bank) {
       state.banks[slot] = bank;
       state.loadedSlot = slot;
+      state.globalLoadedSlot = null;
       state.updatedAt = Date.now();
       return state;
     },
-    async setLoadedSlot(_d: string, slot: number | null) {
-      state.loadedSlot = slot;
+    async saveGlobalScene(_d: string, slot: number, bank: Bank) {
+      globalBanks[slot] = bank;
+      state.globalLoadedSlot = slot;
+      state.loadedSlot = null;
+      state.updatedAt = Date.now();
+      return { camera: state, globalBanks: [...globalBanks] };
+    },
+    async setLoadedScene(
+      _d: string,
+      update: { slot?: number | null; globalLoadedSlot?: number | null },
+    ) {
+      if ("slot" in update) {
+        state.loadedSlot = update.slot ?? null;
+        if (state.loadedSlot !== null) state.globalLoadedSlot = null;
+      }
+      if ("globalLoadedSlot" in update) {
+        state.globalLoadedSlot = update.globalLoadedSlot ?? null;
+        if (state.globalLoadedSlot !== null) state.loadedSlot = null;
+      }
       return state;
     },
     async saveLastState() {

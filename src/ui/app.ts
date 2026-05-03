@@ -46,7 +46,7 @@ import {
   type PaintGroup,
   type ViewId,
 } from "./panel";
-import { applyBankToCamera, applyColorBankToCamera, BANK_COUNT, buildBankFromSnapshot, emptyBanksFile, type Bank, type BanksFile } from "../banks/bank";
+import { applyBankToCamera, applyColorBankToCamera, BANK_COUNT, buildBankFromSnapshot, emptyBanksFile, GLOBAL_SCENE_COUNT, SCENE_SLOT_COUNT, type Bank, type BanksFile } from "../banks/bank";
 import { HttpBanksApi, NullBanksApi, type BanksApi } from "../banks/banksClient";
 import type { CameraClient } from "./cameraClientTypes";
 
@@ -73,12 +73,15 @@ function readRelaySceneHintsFromSnap(snap: Record<string, unknown>): {
   if (RELAY_LOADED_SLOT_KEY in snap) {
     const v = snap[RELAY_LOADED_SLOT_KEY];
     if (v === null) loadedSlot = null;
-    else if (typeof v === "number" && Number.isInteger(v) && v >= 0 && v < BANK_COUNT) loadedSlot = v;
+    else if (typeof v === "number" && Number.isInteger(v) && v >= 0 && v < SCENE_SLOT_COUNT) loadedSlot = v;
   }
   const f = snap[RELAY_SCENE_FILLED_KEY];
   let filledSlots: boolean[] | undefined;
-  if (Array.isArray(f) && f.length === BANK_COUNT && f.every((x) => x === true || x === false)) {
-    filledSlots = f as boolean[];
+  if (Array.isArray(f) && f.every((x) => x === true || x === false)) {
+    if (f.length === SCENE_SLOT_COUNT) filledSlots = f as boolean[];
+    else if (f.length === BANK_COUNT) {
+      filledSlots = [...(f as boolean[]), ...Array<boolean>(GLOBAL_SCENE_COUNT).fill(false)];
+    }
   }
   return { loadedSlot, filledSlots };
 }
@@ -102,6 +105,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   };
 
   let banks: BanksFile = emptyBanksFile();
+  let globalScenes: Array<Bank | null> = Array.from({ length: GLOBAL_SCENE_COUNT }, () => null);
   let storeArmed = false;
   let activeDeviceId: string | undefined;
   let relayHostBridge: RelayHostSession | undefined;
@@ -117,15 +121,34 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   let currentScene: Bank = buildBankFromSnapshot(state.current);
   let loadedBankSnapshot: Bank | null = null;
 
+  function resolveLoadedBankSnapshot(): Bank | null {
+    if (banks.loadedSlot !== null) return banks.banks[banks.loadedSlot] ?? null;
+    if (banks.globalLoadedSlot !== null) return globalScenes[banks.globalLoadedSlot] ?? null;
+    return null;
+  }
+
+  function unifiedLoadedSlotForUi(): number | null {
+    if (banks.loadedSlot !== null) return banks.loadedSlot;
+    if (banks.globalLoadedSlot !== null) return BANK_COUNT + banks.globalLoadedSlot;
+    return null;
+  }
+
+  function normalizeGlobalBanks(banksIn: Array<Bank | null>): Array<Bank | null> {
+    const out = banksIn.slice(0, GLOBAL_SCENE_COUNT);
+    while (out.length < GLOBAL_SCENE_COUNT) out.push(null);
+    return out;
+  }
+
   const isDirty = (): boolean => {
-    if (banks.loadedSlot === null || !loadedBankSnapshot) return false;
+    if (!loadedBankSnapshot) return false;
+    if (banks.loadedSlot === null && banks.globalLoadedSlot === null) return false;
     return JSON.stringify(currentScene) !== JSON.stringify(loadedBankSnapshot);
   };
 
   const renderBanks = (): void => {
     updateSceneBanks(root, {
-      filledSlots: banks.banks.map((slot) => slot !== null),
-      loadedSlot: banks.loadedSlot,
+      filledSlots: [...banks.banks.map((slot) => slot !== null), ...globalScenes.map((s) => s !== null)],
+      loadedSlot: unifiedLoadedSlotForUi(),
       storeArmed,
       dirty: isDirty(),
     });
@@ -133,13 +156,36 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
 
   function applyRelaySceneBankHints(hints: ReturnType<typeof readRelaySceneHintsFromSnap>): void {
     if (hints.loadedSlot === undefined && hints.filledSlots === undefined) return;
-    const nextLoaded = hints.loadedSlot !== undefined ? hints.loadedSlot : banks.loadedSlot;
-    const nextBankSlots =
-      hints.filledSlots !== undefined
-        ? banks.banks.map((b, i) => (hints.filledSlots![i] ? b : null))
-        : banks.banks;
-    banks = { ...banks, loadedSlot: nextLoaded, banks: nextBankSlots };
-    loadedBankSnapshot = banks.loadedSlot !== null ? banks.banks[banks.loadedSlot] ?? null : null;
+    let nextBanks = banks.banks;
+    let nextGlobal = globalScenes;
+    if (hints.filledSlots !== undefined) {
+      const f = hints.filledSlots;
+      nextBanks = banks.banks.map((b, i) => (f[i] ? b : null));
+      nextGlobal = globalScenes.map((b, i) => (f[i + BANK_COUNT] ? b : null));
+    }
+    let nextLoadedLocal = banks.loadedSlot;
+    let nextLoadedGlobal = banks.globalLoadedSlot;
+    if (hints.loadedSlot !== undefined) {
+      const u = hints.loadedSlot;
+      if (u === null) {
+        nextLoadedLocal = null;
+        nextLoadedGlobal = null;
+      } else if (u < BANK_COUNT) {
+        nextLoadedLocal = u;
+        nextLoadedGlobal = null;
+      } else {
+        nextLoadedLocal = null;
+        nextLoadedGlobal = u - BANK_COUNT;
+      }
+    }
+    banks = {
+      ...banks,
+      banks: nextBanks,
+      loadedSlot: nextLoadedLocal,
+      globalLoadedSlot: nextLoadedGlobal,
+    };
+    globalScenes = nextGlobal;
+    loadedBankSnapshot = resolveLoadedBankSnapshot();
     renderBanks();
   }
 
@@ -151,8 +197,11 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   const loadBanksFor = async (deviceId: string, opts?: { relayJoin?: boolean }): Promise<void> => {
     activeDeviceId = deviceId;
     try {
-      banks = await banksApi.load(deviceId);
-      loadedBankSnapshot = banks.loadedSlot !== null ? banks.banks[banks.loadedSlot] ?? null : null;
+      const [next, globalFile] = await Promise.all([banksApi.load(deviceId), banksApi.loadGlobalScenes()]);
+      banks = next;
+      if (banks.globalLoadedSlot === undefined) banks = { ...banks, globalLoadedSlot: null };
+      globalScenes = normalizeGlobalBanks(globalFile.banks);
+      loadedBankSnapshot = resolveLoadedBankSnapshot();
       prevDirty = false;
       renderBanks();
       const savedCameraNumber = banks.lastState?.cameraNumber;
@@ -213,8 +262,11 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
 
   function buildRelayPanelSyncEnvelope(): Record<string, unknown> {
     const snap = serializeCameraSnapshotForRelay(state.current);
-    snap[RELAY_LOADED_SLOT_KEY] = banks.loadedSlot;
-    snap[RELAY_SCENE_FILLED_KEY] = banks.banks.map((b) => b !== null);
+    snap[RELAY_LOADED_SLOT_KEY] = unifiedLoadedSlotForUi();
+    snap[RELAY_SCENE_FILLED_KEY] = [
+      ...banks.banks.map((b) => b !== null),
+      ...globalScenes.map((b) => b !== null),
+    ];
     snap[RELAY_BANKS_REVISION_KEY] = banksRevisionCounter;
     return snap;
   }
@@ -231,10 +283,11 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
 
   async function reloadSceneBanksFromShared(cameraId: string): Promise<void> {
     try {
-      const next = await banksApi.load(cameraId);
+      const [next, globalFile] = await Promise.all([banksApi.load(cameraId), banksApi.loadGlobalScenes()]);
       if (cameraId !== activeDeviceId) return;
-      banks = next;
-      loadedBankSnapshot = banks.loadedSlot !== null ? banks.banks[banks.loadedSlot] ?? null : null;
+      banks = next.globalLoadedSlot === undefined ? { ...next, globalLoadedSlot: null } : next;
+      globalScenes = normalizeGlobalBanks(globalFile.banks);
+      loadedBankSnapshot = resolveLoadedBankSnapshot();
       renderBanks();
       banksRevisionCounter += 1;
       if (relayHostBridge?.isActive) relayHostBridge.pushPanelSync(buildRelayPanelSyncEnvelope());
@@ -772,6 +825,14 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
 
   renderBanks();
 
+  void banksApi
+    .loadGlobalScenes()
+    .then((g) => {
+      globalScenes = normalizeGlobalBanks(g.banks);
+      renderBanks();
+    })
+    .catch(() => {});
+
   const SESSION_RELAY_LS = "bm-relay-session-prefs-v1";
 
   interface RelayStoredPrefs {
@@ -818,8 +879,11 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
           type: "bootstrap_snapshot",
           snapshot: (() => {
             const snap = serializeCameraSnapshotForRelay(state.current);
-            snap[RELAY_LOADED_SLOT_KEY] = banks.loadedSlot;
-            snap[RELAY_SCENE_FILLED_KEY] = banks.banks.map((b) => b !== null);
+            snap[RELAY_LOADED_SLOT_KEY] = unifiedLoadedSlotForUi();
+            snap[RELAY_SCENE_FILLED_KEY] = [
+              ...banks.banks.map((b) => b !== null),
+              ...globalScenes.map((b) => b !== null),
+            ];
             snap[RELAY_BANKS_REVISION_KEY] = banksRevisionCounter;
             return snap;
           })(),
@@ -1283,29 +1347,45 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   root.querySelectorAll<HTMLButtonElement>("[data-scene-bank]").forEach((button) => {
     button.addEventListener("click", async () => {
       const slot = Number(button.dataset.bankSlot ?? "0");
-      if (Number.isNaN(slot) || slot < 0 || slot >= BANK_COUNT) return;
+      if (Number.isNaN(slot) || slot < 0 || slot >= SCENE_SLOT_COUNT) return;
+
+      const isGlobal = slot >= BANK_COUNT;
+      const localSlot = isGlobal ? -1 : slot;
+      const globalIdx = isGlobal ? slot - BANK_COUNT : -1;
 
       if (storeArmed) {
         if (!activeDeviceId) return;
         const bank = buildBankFromSnapshot(state.current);
         try {
-          banks = await banksApi.saveBank(activeDeviceId, slot, bank);
+          if (isGlobal) {
+            const res = await banksApi.saveGlobalScene(activeDeviceId, globalIdx, bank);
+            banks = res.camera.globalLoadedSlot === undefined ? { ...res.camera, globalLoadedSlot: null } : res.camera;
+            globalScenes = normalizeGlobalBanks(res.globalBanks);
+          } else {
+            banks = await banksApi.saveBank(activeDeviceId, localSlot, bank);
+            if (banks.globalLoadedSlot === undefined) banks = { ...banks, globalLoadedSlot: null };
+          }
           setStoreArmed(false);
           loadedBankSnapshot = bank;
           prevDirty = false;
           renderBanks();
-          log(`Stored current settings to bank ${slot + 1}`);
+          log(
+            isGlobal
+              ? `Stored current settings to global ${globalIdx + 1}`
+              : `Stored current settings to bank ${localSlot + 1}`,
+          );
           notifyJoinersBanksChanged();
           if (relayJoinedMode) relayJoinTransport().notifySharedSessionDirty();
         } catch (error) {
-          log(`Bank store failed: ${errorMessage(error)}`);
+          log(`${isGlobal ? "Global scene" : "Bank"} store failed: ${errorMessage(error)}`);
         }
         return;
       }
 
-      const bank = banks.banks[slot];
+      const bank = isGlobal ? globalScenes[globalIdx] : banks.banks[localSlot];
       if (!bank) {
-        log(`Bank ${slot + 1} is empty`);
+        const emptyLabel = isGlobal ? `G${globalIdx + 1}` : `Bank ${localSlot + 1}`;
+        log(`${emptyLabel} is empty`);
         return;
       }
 
@@ -1314,18 +1394,23 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
           skipNdBle: isUrsaCameraName(state.current.deviceName),
         });
         if (activeDeviceId) {
-          banks = await banksApi.setLoadedSlot(activeDeviceId, slot);
+          banks = isGlobal
+            ? await banksApi.setLoadedScene(activeDeviceId, { globalLoadedSlot: globalIdx })
+            : await banksApi.setLoadedScene(activeDeviceId, { slot: localSlot });
+          if (banks.globalLoadedSlot === undefined) banks = { ...banks, globalLoadedSlot: null };
         } else {
-          banks = { ...banks, loadedSlot: slot };
+          banks = isGlobal
+            ? { ...banks, loadedSlot: null, globalLoadedSlot: globalIdx }
+            : { ...banks, loadedSlot: localSlot, globalLoadedSlot: null };
         }
         loadedBankSnapshot = bank;
         prevDirty = false;
         renderBanks();
-        log(`Loaded bank ${slot + 1}`);
+        log(isGlobal ? `Loaded global ${globalIdx + 1}` : `Loaded bank ${localSlot + 1}`);
         notifyJoinersBanksChanged();
         if (relayJoinedMode) relayJoinTransport().notifySharedSessionDirty();
       } catch (error) {
-        log(`Bank load failed: ${errorMessage(error)}`);
+        log(`${isGlobal ? "Global scene" : "Bank"} load failed: ${errorMessage(error)}`);
       }
     });
   });

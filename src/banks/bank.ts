@@ -1,7 +1,12 @@
 import { commands } from "../blackmagic/protocol";
 import type { CameraSnapshot, LiftGainGamma } from "../blackmagic/cameraState";
 
+/** Per-camera scene file slots (1–5 in the UI). */
 export const BANK_COUNT = 5;
+/** Global scenes G1–G4 shared across all cameras; stored once in the server DB. */
+export const GLOBAL_SCENE_COUNT = 4;
+/** Total scene buttons in the bar: local 1–5 plus G1–G4. */
+export const SCENE_SLOT_COUNT = BANK_COUNT + GLOBAL_SCENE_COUNT;
 
 export interface Bank {
   cameraNumber?: number;
@@ -46,17 +51,31 @@ export interface Bank {
 
 export interface BanksFile {
   banks: Array<Bank | null>;
+  /** Local scene (0–{@link BANK_COUNT}-1) last recalled for this camera, if any. */
   loadedSlot: number | null;
+  /** Global scene index (0–{@link GLOBAL_SCENE_COUNT}-1 = G1–G4) last recalled for this camera, if any. */
+  globalLoadedSlot: number | null;
   lastState: Bank | null;
   updatedAt: number;
+}
+
+export interface GlobalScenesFile {
+  banks: Array<Bank | null>;
 }
 
 export function emptyBanksFile(): BanksFile {
   return {
     banks: Array.from({ length: BANK_COUNT }, () => null),
     loadedSlot: null,
+    globalLoadedSlot: null,
     lastState: null,
     updatedAt: Date.now(),
+  };
+}
+
+export function emptyGlobalScenesFile(): GlobalScenesFile {
+  return {
+    banks: Array.from({ length: GLOBAL_SCENE_COUNT }, () => null),
   };
 }
 

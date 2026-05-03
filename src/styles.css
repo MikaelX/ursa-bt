@@ -994,8 +994,9 @@ button.bluefy-modal-dismiss {
 
 .scene-file-banks {
   display: flex;
-  gap: 0.45rem;
+  gap: 0.28rem;
   flex: 1;
+  min-width: 0;
 }
 
 .scene-bank {
@@ -1004,10 +1005,11 @@ button.bluefy-modal-dismiss {
   flex-direction: row;
   align-items: center;
   justify-content: center;
-  gap: 0.32rem;
-  flex: 1;
+  gap: 0.22rem;
+  flex: 1 1 0;
+  min-width: 0;
   min-height: 26px;
-  padding: 0.18rem 0.32rem;
+  padding: 0.14rem 0.2rem;
   border-radius: 0.35rem;
   background: linear-gradient(180deg, #14171b 0%, #0b0d10 100%);
   color: #7a8494;
@@ -1017,7 +1019,7 @@ button.bluefy-modal-dismiss {
     inset 0 -2px 5px rgba(0, 0, 0, 0.5),
     0 1px 0 rgba(0, 0, 0, 0.35);
   font-weight: 700;
-  font-size: 0.72rem;
+  font-size: 0.65rem;
   transition:
     color 0.14s ease,
     border-color 0.14s ease,
@@ -1054,9 +1056,14 @@ button.bluefy-modal-dismiss {
   line-height: 1;
 }
 
+.scene-bank--global .scene-bank-label {
+  font-size: 0.58rem;
+  letter-spacing: -0.02em;
+}
+
 .scene-bank-led {
   box-sizing: border-box;
-  width: 10px;
+  width: 8px;
   height: 3px;
   border-radius: 2px;
   background: rgba(0, 0, 0, 0.55);
@@ -1214,7 +1221,7 @@ button.bluefy-modal-dismiss {
   position: absolute;
   inset: 0.3rem 0.5rem auto 0.5rem;
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(7, 1fr);
   align-items: center;
   font-size: 0.55rem;
   color: #8d949c;
@@ -1223,6 +1230,9 @@ button.bluefy-modal-dismiss {
 
 .h-fader-scale span:first-child { color: #76e26a; text-align: left; }
 .h-fader-scale span:last-child { color: #ff7b6f; text-align: right; }
+.h-fader-scale span:nth-child(4) {
+  text-align: center;
+}
 
 .app-bm-hfader-inline .bm-fader__channel {
   position: absolute;
@@ -1470,9 +1480,10 @@ button.bluefy-modal-dismiss {
   min-width: 0;
 }
 
-/* Recessed chassis: color lift/gamma/gain + audio/video mini-fader grids (same `.audio-faders` in both views). */
+/* Recessed chassis: color lift/gamma/gain, advanced extras row, + audio/video mini-fader grids. */
 .color-group,
-.audio-faders {
+.audio-faders,
+.color-extras {
   background:
     linear-gradient(180deg, rgba(0, 0, 0, 0.45) 0%, rgba(0, 0, 0, 0.20) 28%, rgba(0, 0, 0, 0.20) 72%, rgba(0, 0, 0, 0.40) 100%),
     rgba(8, 9, 11, 0.85);
@@ -1486,7 +1497,8 @@ button.bluefy-modal-dismiss {
     0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
-.color-group {
+.color-group,
+.color-extras {
   padding: 0.6rem 0.8rem 0.7rem;
 }
 
@@ -1552,28 +1564,48 @@ button.bluefy-modal-dismiss {
 .color-extras {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 0.55rem;
+  gap: 0.8rem;
 }
 
 .color-extras-row {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 0.4rem;
+  min-width: 0;
 }
 
-.color-extras-meta {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.5rem;
+.color-extras-label {
   font-size: 0.7rem;
   letter-spacing: 0.04em;
   color: #c4cad2;
   text-transform: uppercase;
 }
 
-.color-extras-meta .readout-mini {
+.color-extras-fader-wrap {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.65rem;
+  min-width: 0;
+  width: 100%;
+}
+
+.color-extras-fader-wrap .color-extras-seg {
+  flex: 0 0 auto;
   font-variant-numeric: tabular-nums;
+}
+
+/* Paint knobs stretch the readout; extras row should keep natural height and center on the fader. */
+.color-extras-fader-wrap .color-extras-seg.app-bm-seg-readout.paint-value-seg.bm-seg2 {
+  align-self: center;
+  border: none;
+}
+
+.color-extras-fader-wrap .color-hfader.h-fader {
+  border: none;
+  width: auto;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .color-hfader {
@@ -1635,12 +1667,37 @@ button.bluefy-modal-dismiss {
   padding: clamp(0.42rem, 3vw, 0.55rem) clamp(0.45rem, 2vw, 0.65rem);
 }
 
+.color-card .color-extras-fader-wrap .color-hfader {
+  height: clamp(40px, 2.6vw, 44px);
+  min-height: clamp(40px, 2.6vw, 44px);
+  padding: 0.15rem 0.42rem;
+  box-sizing: border-box;
+}
+
+.color-card .color-extras {
+  gap: 0.85rem;
+}
+
+.color-card .color-extras-fader-wrap {
+  gap: clamp(0.55rem, 2.5vw, 0.75rem);
+}
+
 .color-card .color-hfader .h-fader-scale {
   font-size: clamp(0.54rem, 2.8vw, 0.65rem);
 }
 
+.color-card .color-extras-fader-wrap .color-hfader .h-fader-scale {
+  font-size: clamp(0.52rem, 2.5vw, 0.62rem);
+}
+
 .color-card .color-hfader.app-bm-hfader-inline {
   --thumb-w: min(calc(100% - 4px), 2.25rem);
+}
+
+.color-card .color-extras-fader-wrap .color-hfader.app-bm-hfader-inline {
+  --thumb-w: 20px;
+  --thumb-h: 32px;
+  --track-h: 6px;
 }
 
 .status-flags {
@@ -1868,11 +1925,25 @@ button.bluefy-modal-dismiss {
   position: absolute;
   inset: 0.5rem auto 0.5rem 0.3rem;
   display: grid;
-  grid-template-rows: repeat(6, 1fr);
+  grid-template-rows: repeat(7, 1fr);
   align-items: center;
   font-size: 0.55rem;
   color: #8d949c;
   pointer-events: none;
+}
+
+.mini-fader-scale span:first-child {
+  color: #ff7b6f;
+  text-align: right;
+}
+
+.mini-fader-scale span:last-child {
+  color: #76e26a;
+  text-align: right;
+}
+
+.mini-fader-scale span:nth-child(4) {
+  text-align: center;
 }
 
 .mini-fader.dragging .bm-mfader__thumb {
@@ -2362,7 +2433,10 @@ body {
   }
   .scene-bank {
     min-height: 2rem;
-    font-size: 0.76rem;
+    font-size: 0.64rem;
+  }
+  .scene-bank--global .scene-bank-label {
+    font-size: 0.56rem;
   }
 
   /* Footer row – wrap on mobile */
@@ -3204,6 +3278,33 @@ body {
   text-shadow: 0 0 8px rgba(255, 120, 55, 0.52);
 }
 
+/* Mobile / small tablet (<720px): 6-col stage — iris spans 2 cols (wider T-bar), keys span 4 */
+@media (max-width: 719px) {
+  .view--iris .iris-stage-grid {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 0.45rem;
+    align-items: start;
+  }
+
+  .view--iris .iris-primary {
+    grid-column: 1 / span 2;
+    min-width: 0;
+  }
+
+  .view--iris .iris-side-buttons {
+    grid-column: 3 / -1;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-auto-rows: minmax(1.75rem, auto);
+    gap: 0.26rem 0.3rem;
+  }
+
+  .view--iris .iris-joystick--xl.app-bm-iris-tbar.bm-tbar {
+    width: 100%;
+    max-width: none;
+  }
+}
+
 /* Tablet & up — larger iris rail; side keys in 4 cols */
 @media (min-width: 720px) {
   .iris-stage {
@@ -3214,19 +3315,13 @@ body {
     grid-template-columns: minmax(170px, 185px) minmax(0, 1fr);
     gap: 0.85rem;
   }
-  .iris-primary {
-    padding: 0.65rem 0.72rem 0.55rem;
+
+  .view--iris .iris-primary {
+    grid-column: 1 / span 1;
   }
-  .iris-joystick--xl.app-bm-iris-tbar.bm-tbar {
-    width: 100%;
-    max-width: 170px;
-    height: clamp(260px, min(36dvh, 20.5rem), 380px);
-  }
-  .iris-joystick--xl .bm-tbar__handle {
-    --handle-h: 32px;
-    --handle-w: min(82px, 100%);
-  }
+
   .view--iris .iris-side-buttons {
+    grid-column: 2;
     grid-template-columns: repeat(4, minmax(0, 1fr));
     grid-auto-rows: minmax(1.85rem, auto);
     gap: 0.32rem 0.36rem;
@@ -3264,11 +3359,11 @@ body {
   .iris-primary .iris-label {
     font-size: 0.62rem;
   }
-  /* Wider / taller iris rail; side keys compact so the fader gets priority */
-  .iris-joystick--xl.app-bm-iris-tbar.bm-tbar {
+  /* Six-col stage (≤719px) already widens the rail; keep T-bar filling that span */
+  .view--iris .iris-joystick--xl.app-bm-iris-tbar.bm-tbar {
     height: clamp(210px, 42dvh, 300px);
-    max-width: 146px;
-    width: min(146px, 54vw);
+    width: 100%;
+    max-width: none;
   }
   .iris-joystick--xl .bm-tbar__handle {
     --handle-h: 26px;
@@ -3312,11 +3407,6 @@ body {
   .iris-focus-readout.app-bm-seg-readout .bm-seg__digit {
     --digit-size: 0.92rem;
   }
-  .view--iris .iris-side-buttons {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    grid-auto-rows: minmax(2rem, auto);
-    gap: 0.28rem 0.24rem;
-  }
   .view--iris .iris-side-buttons .side-btn {
     font-size: 0.55rem;
     padding: 0.32rem 0.18rem;
@@ -3343,9 +3433,9 @@ body {
   .iris-mb-cell { padding: 0.35rem 0.4rem; gap: 0.35rem; }
   .iris-mb-cell .knob-value { font-size: 0.95rem; }
   .iris-focus-cell { padding: 0.35rem 0.4rem 0.4rem; }
-  .iris-joystick--xl.app-bm-iris-tbar.bm-tbar {
-    max-width: 132px;
-    width: min(132px, 52vw);
+  .view--iris .iris-joystick--xl.app-bm-iris-tbar.bm-tbar {
+    width: 100%;
+    max-width: none;
     height: clamp(200px, 40dvh, 288px);
   }
   .iris-joystick--xl .bm-tbar__handle {
@@ -3498,8 +3588,16 @@ body {
     gap: 1.35rem;
     align-items: start;
   }
+
   .view--iris .iris-primary {
+    grid-column: 1 / span 1;
     padding: 0.85rem 1rem 0.7rem;
+  }
+
+  .view--iris .iris-side-buttons {
+    grid-column: 2;
+    grid-auto-rows: minmax(2rem, auto);
+    gap: 0.4rem 0.44rem;
   }
 
   /* Iris secondary row: wider focus strip on desktop */
@@ -3516,11 +3614,6 @@ body {
   .iris-joystick--xl .bm-tbar__handle {
     --handle-h: 36px;
     --handle-w: min(96px, 100%);
-  }
-
-  .view--iris .iris-side-buttons {
-    grid-auto-rows: minmax(2rem, auto);
-    gap: 0.4rem 0.44rem;
   }
 
   .view--iris .iris-side-buttons .side-btn {

@@ -1,4 +1,5 @@
 import type { CameraSnapshot } from "../blackmagic/cameraState";
+import { BANK_COUNT, SCENE_SLOT_COUNT } from "../banks/bank";
 import { formatSegSignedFixed2, populateSegSlots } from "./segmentDisplay";
 
 export const CAMERA_COUNT = 8;
@@ -134,7 +135,7 @@ function renderColorGroup(group: PaintGroup, label: string, min: number, max: nu
                   tabindex="0"
                 >
                   <div class="mini-fader-scale">
-                    <span>${formatScale(max)}</span><span></span><span>${formatScale(defaultValue)}</span><span></span><span></span><span>${formatScale(min)}</span>
+                    <span>${formatScale(max)}</span><span></span><span></span><span>${formatScale(defaultValue)}</span><span></span><span></span><span>${formatScale(min)}</span>
                   </div>
                   <div class="bm-mfader__track">
                     <span class="bm-mfader__fill" data-vfader-fill aria-hidden="true"></span>
@@ -163,37 +164,37 @@ function renderColorHFader(
 ): string {
   return `
     <div class="color-extras-row">
-      <div class="color-extras-meta">
-        <span class="color-extras-label">${label}</span>
+      <span class="color-extras-label">${label}</span>
+      <div class="color-extras-fader-wrap">
+        <div class="h-fader color-hfader app-bm-hfader-inline" data-control>
+          <div class="h-fader-scale">
+            <span>${formatScale(min)}</span><span></span><span></span><span>${formatScale(defaultValue)}</span><span></span><span></span><span>${formatScale(max)}</span>
+          </div>
+          <div
+            class="bm-fader__channel color-hfader__channel"
+            data-hfader="${attr}"
+            data-min="${min}"
+            data-max="${max}"
+            data-default="${defaultValue}"
+            aria-label="${label}"
+            role="slider"
+            aria-valuemin="${min}"
+            aria-valuemax="${max}"
+            aria-valuenow="${defaultValue}"
+            tabindex="0"
+          >
+            <div class="bm-fader__track">
+              <span class="bm-fader__meter" aria-hidden="true" style="--meter:0"></span>
+              <span class="bm-fader__ticks" aria-hidden="true"></span>
+            </div>
+            <div class="bm-fader__thumb" data-hfader-handle>
+              <span class="bm-fader__cap"></span>
+            </div>
+          </div>
+        </div>
         <span class="bm-seg2 app-bm-seg-readout paint-value-seg bm-seg--green color-extras-seg" data-readout="${readoutKey}" data-seg-display>
           <span class="bm-seg2__display" data-seg-slots></span>
         </span>
-      </div>
-      <div class="h-fader color-hfader app-bm-hfader-inline" data-control style="--thumb-w:26px;--thumb-h:14px;--track-h:6px;">
-        <div class="h-fader-scale">
-          <span>${formatScale(min)}</span><span></span><span>${formatScale(defaultValue)}</span><span></span><span></span><span>${formatScale(max)}</span>
-        </div>
-        <div
-          class="bm-fader__channel color-hfader__channel"
-          data-hfader="${attr}"
-          data-min="${min}"
-          data-max="${max}"
-          data-default="${defaultValue}"
-          aria-label="${label}"
-          role="slider"
-          aria-valuemin="${min}"
-          aria-valuemax="${max}"
-          aria-valuenow="${defaultValue}"
-          tabindex="0"
-        >
-          <div class="bm-fader__track">
-            <span class="bm-fader__meter" aria-hidden="true" style="--meter:0"></span>
-            <span class="bm-fader__ticks" aria-hidden="true"></span>
-          </div>
-          <div class="bm-fader__thumb" data-hfader-handle>
-            <span class="bm-fader__cap"></span>
-          </div>
-        </div>
       </div>
     </div>
   `;
@@ -726,6 +727,7 @@ function renderIrisView(): string {
                 <span></span>
                 <span></span>
                 <span></span>
+                <span></span>
                 <span>FAR</span>
               </div>
               <div class="bm-fader__channel iris-focus-fader__channel" data-h-fader="focus">
@@ -968,19 +970,22 @@ function renderSceneBar(): string {
       <div class="chassis-row scene-file-row">
         <span class="scene-file-label">SCENE FILE</span>
         <div class="scene-file-banks" data-scene-banks>
-          ${Array.from({ length: 5 }, (_, index) => {
+          ${Array.from({ length: SCENE_SLOT_COUNT }, (_, index) => {
             const slot = index;
+            const isGlobal = slot >= BANK_COUNT;
+            const label = isGlobal ? `G${slot - BANK_COUNT + 1}` : String(slot + 1);
+            const ariaDefault = isGlobal ? `Global scene ${label}` : `Scene file ${slot + 1}`;
             return `
               <button
-                class="scene-bank"
+                class="scene-bank${isGlobal ? " scene-bank--global" : ""}"
                 data-scene-bank
                 data-bank-slot="${slot}"
                 data-control
-                aria-label="Scene file ${slot + 1}"
+                aria-label="${ariaDefault}"
                 aria-pressed="false"
               >
                 <span class="scene-bank-led" aria-hidden="true"></span>
-                <span class="scene-bank-label">${slot + 1}</span>
+                <span class="scene-bank-label">${label}</span>
               </button>
             `;
           }).join("")}
@@ -1238,7 +1243,9 @@ export function updatePanel(
 }
 
 export interface SceneBanksUiState {
+  /** Per-button fill state: indices 0–4 local scenes, 5–8 global G1–G4. */
   filledSlots: boolean[];
+  /** Unified loaded index: 0–4 local, 5–8 global, or null. */
   loadedSlot: number | null;
   storeArmed: boolean;
   /** True when the live panel state has diverged from the loaded bank. */
@@ -1255,18 +1262,21 @@ export function updateSceneBanks(root: HTMLElement, ui: SceneBanksUiState): void
     button.classList.toggle("loaded", loaded);
     button.classList.toggle("dirty", dirty);
     button.setAttribute("aria-pressed", loaded ? "true" : "false");
-    const n = slot + 1;
+    const isGlobal = slot >= BANK_COUNT;
+    const labelText = isGlobal ? `G${slot - BANK_COUNT + 1}` : String(slot + 1);
+    const kind = isGlobal ? "Global" : "Scene";
     const title = loaded
       ? dirty
-        ? `Scene ${n} (loaded, unsaved changes)`
-        : `Scene ${n} (loaded)`
+        ? `${kind} ${labelText} (loaded, unsaved changes)`
+        : `${kind} ${labelText} (loaded)`
       : filled
-        ? `Scene ${n} (saved)`
-        : `Scene ${n} (empty)`;
+        ? `${kind} ${labelText} (saved)`
+        : `${kind} ${labelText} (empty)`;
     button.title = title;
+    const ariaCore = isGlobal ? `Global scene ${labelText}` : `Scene file ${slot + 1}`;
     button.setAttribute(
       "aria-label",
-      loaded ? `Scene file ${n}, loaded${dirty ? ", modified since load" : ""}` : `Scene file ${n}, ${filled ? "saved" : "empty"}`,
+      loaded ? `${ariaCore}, loaded${dirty ? ", modified since load" : ""}` : `${ariaCore}, ${filled ? "saved" : "empty"}`,
     );
   });
 
