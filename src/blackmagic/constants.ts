@@ -1,3 +1,11 @@
+/**
+ * @file constants.ts
+ *
+ * bm-bluetooth — Canonical lowercase GATT UUID strings for Blackmagic Camera Service characteristics.
+ *
+ * Keep values aligned with `docs/BlackmagicCameraControl.pdf`. This repo is **private**.
+ */
+
 export const BLACKMAGIC_CAMERA_SERVICE ="291d567a-6d75-11e6-8b77-86f30ca893d3";
 
 export const DEVICE_INFORMATION_SERVICE = "0000180a-0000-1000-8000-00805f9b34fb";
@@ -11,3 +19,8 @@ export const TIMECODE_CHARACTERISTIC ="6d8f2110-86f1-41bf-9afb-451d87e976c8";
 
 export const DEVICE_NAME_CHARACTERISTIC="ffac0c52-c9fb-41a0-b063-cc76282eb89c";
 export const PROTOCOL_VERSION_CHARACTERISTIC="8f1fd018-b508-456f-8f82-3d392bee2706";
+
+/**
+ * Pause between unattended GATT re-handshake attempts after an unexpected link drop (manual Disconnect cancels timers).
+ */
+export const BLE_AUTO_RECONNECT_INTERVAL_MS = 20_000;

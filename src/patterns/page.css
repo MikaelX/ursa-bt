@@ -5,17 +5,36 @@
    would override the app chrome.
    ========================================================================= */
 
-* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  padding: 0;
+}
 
-html, body { margin: 0; padding: 0; }
+html {
+  height: 100%;
+  overflow-x: clip;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  overscroll-behavior: none;
+}
 
 body {
-  min-height: 100vh;
+  min-height: 100dvh;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: clip;
   background:
     radial-gradient(ellipse at top, #1a1a1c 0%, var(--bm-app-bg) 70%);
   color: var(--bm-text);
   font-family: -apple-system, "SF Pro Text", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
+}
+
+#patterns {
+  width: 100%;
+  max-width: 100%;
+  min-height: 100dvh;
+  overflow-x: clip;
 }
 
 /* =========================================================================

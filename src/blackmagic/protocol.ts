@@ -1,3 +1,16 @@
+/**
+ * @file protocol.ts
+ *
+ * bm-bluetooth — Encode / decode Blackmagic **Change Configuration** packets (category × parameter payloads)
+ * for the outbound/incoming BLE control characteristics. Mirrors the vendor PDF against human-readable enums.
+ *
+ * Consumers: `./cameraState` ingestion, `./bleClient` writers, relay forwarders. **Private** repo.
+ */
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Framing constants & wire enums
+// ─────────────────────────────────────────────────────────────────────────────
+
 const COMMAND_CHANGE_CONFIGURATION = 0;
 const HEADER_LENGTH = 4;
 const CONFIG_COMMAND_LENGTH = 4;
@@ -41,6 +54,10 @@ export interface DecodedConfigurationPacket {
   values: number[];
   stringValue?: string;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Encode & typed payload shards
+// ─────────────────────────────────────────────────────────────────────────────
 
 export function encodeConfigurationCommand(command: ConfigurationCommand): Uint8Array {
   const payload = command.payload ?? [];
@@ -93,6 +110,10 @@ export function toHex(packet: ArrayLike<number>): string {
   return Array.from(packet, (byte) => byte.toString(16).padStart(2, "0")).join(" ");
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Decode ingress packets (incoming characteristic notifications)
+// ─────────────────────────────────────────────────────────────────────────────
+
 export function decodeConfigurationPacket(packet: ArrayLike<number>): DecodedConfigurationPacket | undefined {
   if (packet.length < 8 || packet[2] !== COMMAND_CHANGE_CONFIGURATION) {
     return undefined;
@@ -123,6 +144,10 @@ export function decodeConfigurationPacket(packet: ArrayLike<number>): DecodedCon
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Opinionated outbound packet factories (`commands.*`)
+// ─────────────────────────────────────────────────────────────────────────────
+
 export const commands = {
   recordStart: () =>
     encodeConfigurationCommand({
@@ -151,6 +176,15 @@ export const commands = {
     encodeConfigurationCommand({
       category: 0,
       parameter: 0,
+      dataType: CameraControlDataType.Fixed16,
+      payload: fixed16Payload(clamp(normalised, 0, 1)),
+    }),
+
+  /** Lens zoom 0–1 (category 0 parameter 8). */
+  zoomNormalised: (normalised: number) =>
+    encodeConfigurationCommand({
+      category: 0,
+      parameter: 8,
       dataType: CameraControlDataType.Fixed16,
       payload: fixed16Payload(clamp(normalised, 0, 1)),
     }),
@@ -491,8 +525,39 @@ export const commands = {
       dataType: CameraControlDataType.String,
       payload: stringPayload(id),
     }),
+
+  /**
+   * Video / recording frame rate and raster (category 1 parameter 9).
+   * Use width × height from the live snapshot so the camera keeps the current format.
+   */
+  recordingFormat: (frameRate: number, sensorFrameRate: number, frameWidth: number, frameHeight: number) =>
+    encodeConfigurationCommand({
+      category: 1,
+      parameter: 9,
+      dataType: CameraControlDataType.Int32,
+      payload: int32Payload(
+        Math.round(frameRate),
+        Math.round(sensorFrameRate),
+        Math.round(frameWidth),
+        Math.round(frameHeight),
+      ),
+    }),
+
+  /** Off-speed / sensor frame rate target (category 9 parameter 2). */
+  offSpeedFrameRate: (fps: number) =>
+    encodeConfigurationCommand({
+      category: 9,
+      parameter: 2,
+      dataType: CameraControlDataType.Int32,
+      payload: int32Payload(Math.round(fps)),
+    }),
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Packet mutation & decoding internals
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Clone bytes while overriding camera destination selector (broadcast → explicit body). */
 export function withDestination(packet: Uint8Array, destination: number): Uint8Array {
   const copy = new Uint8Array(packet);
   copy[0] = destination;

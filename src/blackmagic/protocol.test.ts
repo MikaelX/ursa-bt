@@ -115,6 +115,14 @@ describe("Blackmagic Camera Control protocol", () => {
     expect(Array.from(commands.rearTallyBrightness(0))).toEqual([255, 6, 0, 0, 5, 2, 128, 0, 0, 0, 0, 0]);
   });
 
+  it("encodes zoom normalised, recording format, and off-speed frame rate", () => {
+    expect(Array.from(commands.zoomNormalised(0.5))).toEqual([255, 6, 0, 0, 0, 8, 128, 0, 0, 4, 0, 0]);
+    expect(Array.from(commands.recordingFormat(25, 25, 1920, 1080))).toEqual([
+      255, 20, 0, 0, 1, 9, 3, 0, 25, 0, 0, 0, 25, 0, 0, 0, 128, 7, 0, 0, 56, 4, 0, 0,
+    ]);
+    expect(Array.from(commands.offSpeedFrameRate(60))).toEqual([255, 8, 0, 0, 9, 2, 3, 0, 60, 0, 0, 0]);
+  });
+
   it("encodes metadata camera ID as a UTF-8 string payload", () => {
     const packet = commands.metadataCameraId("3");
     expect(packet[4]).toBe(12);

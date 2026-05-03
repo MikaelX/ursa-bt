@@ -193,6 +193,7 @@ describe("BlackmagicBleClient", () => {
 
     expect(server.disconnect).toHaveBeenCalledOnce();
     expect(client.isConnected).toBe(false);
+    expect(onDisconnect).toHaveBeenCalledOnce();
   });
 
   it("auto-reconnects on unexpected disconnect", async () => {
@@ -219,7 +220,7 @@ describe("BlackmagicBleClient", () => {
 
     device.dispatchEvent(new Event("gattserverdisconnected"));
 
-    expect(onReconnectScheduled).toHaveBeenCalledWith(2000, 1);
+    expect(onReconnectScheduled).toHaveBeenCalledWith(20_000, 1);
     expect(fakeSetTimeout).toHaveBeenCalledOnce();
 
     pendingTimers.shift()!();

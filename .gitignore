@@ -1,6 +1,17 @@
 # Dependencies
 node_modules/
 
+# Capacitor native trees (after `npx cap add ios|android`)
+ios/App/Pods/
+ios/App/build/
+ios/App/ExportOptions.local.plist
+**/xcuserdata/
+*.xcuserstate
+android/app/build/
+android/.gradle/
+android/captures/
+android/local.properties
+
 # Build output
 dist/
 build/

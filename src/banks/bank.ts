@@ -1,12 +1,43 @@
 import { commands } from "../blackmagic/protocol";
 import type { CameraSnapshot, LiftGainGamma } from "../blackmagic/cameraState";
 
+/**
+ * @file bank.ts
+ *
+ * bm-bluetooth — Scene/store model mirrored in **`data/cameras.json`**: `{ banks, globalLoadedSlot … }`,
+ * patch builders from live {@link CameraSnapshot}, and ATEM CCU relay blobs (`atemCcuRelay`).
+ *
+ * **Private** repo.
+ */
+
 /** Per-camera scene file slots (1–5 in the UI). */
 export const BANK_COUNT = 5;
 /** Global scenes G1–G4 shared across all cameras; stored once in the server DB. */
 export const GLOBAL_SCENE_COUNT = 4;
 /** Total scene buttons in the bar: local 1–5 plus G1–G4. */
 export const SCENE_SLOT_COUNT = BANK_COUNT + GLOBAL_SCENE_COUNT;
+
+/** Upper bound for BLE command body index / broadcast ID digit picker (matches ATEM CCU clamp in UI). */
+const BODY_CAMERA_ID_MAX = 24;
+
+/**
+ * Resolve persisted camera body index from `lastState` (or a scene bank): prefers `cameraNumber`,
+ * then a numeric-only `metadataCameraId` (some saves had slate ID without `cameraNumber`).
+ */
+export function resolvedBodyCameraIdFromBank(last: Bank | null | undefined): number | undefined {
+  if (!last) return undefined;
+  const n = last.cameraNumber;
+  if (typeof n === "number" && Number.isFinite(n)) {
+    const t = Math.round(n);
+    if (t >= 1 && t <= BODY_CAMERA_ID_MAX) return t;
+  }
+  const meta = last.metadataCameraId?.trim();
+  if (meta && /^\d+$/.test(meta)) {
+    const v = Number(meta);
+    if (v >= 1 && v <= BODY_CAMERA_ID_MAX) return v;
+  }
+  return undefined;
+}
 
 export interface Bank {
   cameraNumber?: number;
@@ -16,6 +47,16 @@ export interface Bank {
   shutterAngle?: number;
   iris?: number;
   focus?: number;
+  /** Lens zoom 0–1 (BLE parameter 8). */
+  zoom?: number;
+  /** Persisted recording raster + FPS for scene recall. */
+  recordingFormat?: {
+    frameRate: number;
+    sensorFrameRate?: number;
+    frameWidth: number;
+    frameHeight: number;
+  };
+  offSpeedFrameRate?: number;
   autoExposureMode?: number;
   color: {
     lift: LiftGainGamma;
@@ -49,6 +90,14 @@ export interface Bank {
   unitOutputs?: { colorBars: boolean; programReturnFeed: boolean };
 }
 
+/** Persisted ATEM CCU switcher target for relay device id `atem-ccu-host` (banks API). */
+export type AtemCcuRelayStored = {
+  address: string;
+  cameraId: number;
+  sessionName?: string;
+  port?: number;
+};
+
 export interface BanksFile {
   banks: Array<Bank | null>;
   /** Local scene (0–{@link BANK_COUNT}-1) last recalled for this camera, if any. */
@@ -57,6 +106,8 @@ export interface BanksFile {
   globalLoadedSlot: number | null;
   lastState: Bank | null;
   updatedAt: number;
+  /** Switcher IP/camera index + session label for ATEM CCU hosting (optional). */
+  atemCcuRelay?: AtemCcuRelayStored;
 }
 
 export interface GlobalScenesFile {
@@ -93,6 +144,19 @@ export function buildBankFromSnapshot(snapshot: CameraSnapshot): Bank {
           : undefined,
     iris: snapshot.lens.apertureNormalised,
     focus: snapshot.lens.focus,
+    zoom: snapshot.lens.zoom,
+    recordingFormat:
+      snapshot.recordingFormat?.frameRate !== undefined &&
+      snapshot.recordingFormat.frameWidth &&
+      snapshot.recordingFormat.frameHeight
+        ? {
+            frameRate: snapshot.recordingFormat.frameRate,
+            sensorFrameRate: snapshot.recordingFormat.sensorFrameRate,
+            frameWidth: snapshot.recordingFormat.frameWidth,
+            frameHeight: snapshot.recordingFormat.frameHeight,
+          }
+        : undefined,
+    offSpeedFrameRate: snapshot.offSpeedFrameRate,
     autoExposureMode: snapshot.autoExposureMode,
     color: {
       lift: { ...snapshot.color.lift },
@@ -175,8 +239,21 @@ export async function applyBankToCamera(
   if (bank.gainDb !== undefined) await send(commands.gain(bank.gainDb));
   if (bank.iso !== undefined) await send(commands.iso(bank.iso));
   if (bank.shutterAngle !== undefined) await send(commands.shutterAngle(bank.shutterAngle));
+  if (bank.recordingFormat) {
+    const r = bank.recordingFormat;
+    await send(
+      commands.recordingFormat(
+        r.frameRate,
+        r.sensorFrameRate ?? r.frameRate,
+        r.frameWidth,
+        r.frameHeight,
+      ),
+    );
+  }
+  if (bank.offSpeedFrameRate !== undefined) await send(commands.offSpeedFrameRate(bank.offSpeedFrameRate));
   if (bank.iris !== undefined) await send(commands.iris(bank.iris));
   if (bank.focus !== undefined) await send(commands.focus(bank.focus));
+  if (bank.zoom !== undefined) await send(commands.zoomNormalised(bank.zoom));
   if (bank.autoExposureMode !== undefined) await send(commands.autoExposureMode(bank.autoExposureMode));
 
   await send(commands.lift(bank.color.lift.red, bank.color.lift.green, bank.color.lift.blue, bank.color.lift.luma));

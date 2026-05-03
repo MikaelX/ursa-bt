@@ -1,6 +1,21 @@
 import { decodeConfigurationPacket, type DecodedConfigurationPacket } from "./protocol";
 import type { CameraStatus } from "./status";
 
+/**
+ * @file cameraState.ts
+ *
+ * bm-bluetooth — Single UI-facing snapshot aggregated from BLE notifications (`ingestIncomingPacket`),
+ * optimistic mirrors (`apply*`), relay bootstrap merges, and telemetry status bytes.
+ *
+ * Maps decoded {@link DecodedConfigurationPacket} tuples into nested {@link CameraSnapshot} buckets.
+ *
+ * Companion docs: `docs/BlackmagicCameraControl.pdf`; packet labels in `./protocol`. **Private** repo.
+ */
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Relay / BLE merge heuristics
+// ─────────────────────────────────────────────────────────────────────────────
+
 /** URSA ND is not reported reliably over Bluetooth; ignore incoming ND fields from the camera only. */
 function snapshotDeviceIsUrsaForBleNd(name: string | undefined): boolean {
   if (!name?.trim()) return false;
@@ -9,10 +24,12 @@ function snapshotDeviceIsUrsaForBleNd(name: string | undefined): boolean {
 
 function isRelayPanelSyncDecoded(packet: DecodedConfigurationPacket): boolean {
   if (packet.category === 4 && (packet.parameter === 4 || packet.parameter === 6)) return true;
+  if (packet.category === 0 && packet.parameter === 8) return true;
   if (
     packet.category === 1 &&
     (packet.parameter === 3 ||
       packet.parameter === 4 ||
+      packet.parameter === 9 ||
       packet.parameter === 13 ||
       packet.parameter === 14 ||
       packet.parameter === 15 ||
@@ -21,10 +38,17 @@ function isRelayPanelSyncDecoded(packet: DecodedConfigurationPacket): boolean {
   ) {
     return true;
   }
+  if (packet.category === 9 && (packet.parameter === 0 || packet.parameter === 2)) return true;
   // Color correction (lift / gamma / gain / offset / contrast / luma mix / hue+sat)
   if (packet.category === 8 && packet.parameter >= 0 && packet.parameter <= 6) return true;
+  // Audio: mic, phones, speaker, input type, L/R channel gain, phantom (joiner → host mirror + panel_sync)
+  if (packet.category === 2 && packet.parameter >= 0 && packet.parameter <= 6) return true;
   return false;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Snapshot wire model (`CameraSnapshot` + listeners)
+// ─────────────────────────────────────────────────────────────────────────────
 
 export interface LiftGainGamma {
   red: number;
@@ -58,7 +82,10 @@ export interface CameraSnapshot {
     apertureFstop?: number;
     apertureNormalised?: number;
     opticalImageStabilisation?: boolean;
+    /** Zoom position 0–1 from lens parameter 8 (normalised). */
     zoom?: number;
+    /** Focal length mm from lens parameter 7 when reported. */
+    zoomMm?: number;
   };
   color: {
     lift: LiftGainGamma;
@@ -120,6 +147,10 @@ export interface IngestIncomingResult {
   changedKeys: string[];
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Defaults & JSON bridge for relay `panel_sync`
+// ─────────────────────────────────────────────────────────────────────────────
+
 const EMPTY_LGG = (): LiftGainGamma => ({ red: 0, green: 0, blue: 0, luma: 0 });
 
 function createEmptySnapshot(): CameraSnapshot {
@@ -141,7 +172,10 @@ function createEmptySnapshot(): CameraSnapshot {
   };
 }
 
-/** Full JSON export for relay `panel_sync`; strips bookkeeping keys only. */
+/**
+ * JSON snapshot used on relay **`panel_sync`** / bootstrap payloads.
+ * Drops `updatedKeys` + `lastUpdateMs` bookkeeping so joiners hydrate clean objects.
+ */
 export function serializeCameraSnapshotForRelay(snapshot: CameraSnapshot): Record<string, unknown> {
   try {
     const raw = JSON.parse(JSON.stringify(snapshot)) as Record<string, unknown>;
@@ -153,6 +187,16 @@ export function serializeCameraSnapshotForRelay(snapshot: CameraSnapshot): Recor
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Mutable store + emitter (`CameraState`)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Central reactive camera model for the SPA: exposes {@link CameraSnapshot} plus subscribe/reset semantics.
+ *
+ * @remarks Incoming BLE traffic mutates shallow copies via {@link CameraState.ingestIncomingPacket}.
+ * Relay joiners hydrate through {@link CameraState.hydrateFromRelayExport} instead of redoing handshake.
+ */
 export class CameraState {
   private snapshot: CameraSnapshot = createEmptySnapshot();
   private readonly listeners = new Set<SnapshotListener>();
@@ -168,6 +212,8 @@ export class CameraState {
       this.listeners.delete(listener);
     };
   }
+
+  // --- Lifecycle & identity hooks ---
 
   reset(): void {
     this.snapshot = createEmptySnapshot();
@@ -200,6 +246,21 @@ export class CameraState {
     });
   }
 
+  /**
+   * Drop presentation fields that came from the live camera over BLE. Called when the
+   * GATT session ends so the UI does not keep showing stale power/status/recording.
+   */
+  clearForLocalBleDisconnect(): void {
+    this.update(["localBleDisconnect"], (draft) => {
+      delete draft.status;
+      delete draft.deviceName;
+      draft.recording = false;
+      delete draft.transportMode;
+    });
+  }
+
+  // --- BLE ingestion ---
+
   ingestStatus(status: CameraStatus): void {
     this.update(["status"], (draft) => {
       draft.status = status;
@@ -222,6 +283,8 @@ export class CameraState {
 
     return { decoded, changedKeys };
   }
+
+  // --- Optimistic UI mirrors (not always echoed inbound on BLE) ---
 
   /** Optimistic ND stops (e.g. URSA mechanical wheel — UI / banks / relay only). */
   applyNdFilterStopsWrite(stops: number): void {
@@ -345,6 +408,8 @@ export class CameraState {
     });
   }
 
+  // --- Relay joiner/host panel sync merges ---
+
   /**
    * Apply command bytes that affect shared panel state (bars, LUT, color, etc.)
    * so the host can mirror joiner writes before broadcasting `panel_sync`.
@@ -374,6 +439,8 @@ export class CameraState {
     this.listeners.forEach((listener) => listener(this.snapshot));
   }
 
+  // --- Immutable-ish update plumbing ---
+
   private update(keys: string[], mutate: (draft: CameraSnapshot) => void): void {
     const next = { ...this.snapshot, updatedKeys: keys, lastUpdateMs: Date.now() };
     next.lens = { ...this.snapshot.lens };
@@ -396,12 +463,21 @@ export class CameraState {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Relay sniffing helpers (mirrored panel deltas)
+// ─────────────────────────────────────────────────────────────────────────────
+
 /** True when a successful BLE write of this packet should trigger relay `panel_sync` from the host. */
 export function shouldRelayPanelSyncCommand(packet: Uint8Array): boolean {
   const decoded = decodeConfigurationPacket(packet);
   return decoded !== undefined && isRelayPanelSyncDecoded(decoded);
 }
 
+/**
+ * Materialize decoded tuples onto the authoritative snapshot bucket used by relays + UI.
+ *
+ * @param source Distinguishes joiner-command mirroring paths from live BLE ingestion (URSA ND guard).
+ */
 function applyDecoded(
   snapshot: CameraSnapshot,
   packet: DecodedConfigurationPacket,
@@ -434,6 +510,10 @@ function applyDecoded(
           mark("lens.opticalImageStabilisation");
           break;
         case 7:
+          snapshot.lens.zoomMm = v0;
+          mark("lens.zoomMm");
+          break;
+        case 8:
           snapshot.lens.zoom = v0;
           mark("lens.zoom");
           break;
@@ -661,6 +741,10 @@ function applyDecoded(
   return changed;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Deep merge utilities for bootstrap / partial relay patches
+// ─────────────────────────────────────────────────────────────────────────────
+
 /** Deep-merge relay JSON into defaults so joining clients inherit the master's live panel snapshot. */
 function relayMergeImportedSnapshot(base: CameraSnapshot, p: Partial<CameraSnapshot>): CameraSnapshot {
   const metadata = {
@@ -729,7 +813,11 @@ function relayMergeImportedSnapshot(base: CameraSnapshot, p: Partial<CameraSnaps
       typeof p.autoWhiteBalanceActive === "boolean"
         ? p.autoWhiteBalanceActive
         : base.autoWhiteBalanceActive,
-    gainDb: typeof p.gainDb === "number" ? p.gainDb : base.gainDb,
+    gainDb: typeof p.gainDb === "number" && !Number.isNaN(p.gainDb) ? p.gainDb : base.gainDb,
+    exposureUs:
+      typeof p.exposureUs === "number" && !Number.isNaN(p.exposureUs) ? p.exposureUs : base.exposureUs,
+    shutterSpeed:
+      typeof p.shutterSpeed === "number" && !Number.isNaN(p.shutterSpeed) ? p.shutterSpeed : base.shutterSpeed,
     iso: typeof p.iso === "number" ? p.iso : base.iso,
     ndFilterStops: typeof p.ndFilterStops === "number" ? p.ndFilterStops : base.ndFilterStops,
     ndFilterDisplayMode:

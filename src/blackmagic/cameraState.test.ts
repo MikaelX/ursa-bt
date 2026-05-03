@@ -202,6 +202,26 @@ describe("CameraState", () => {
     expect(shouldRelayPanelSyncCommand(commands.ndFilterDisplayMode(1))).toBe(true);
   });
 
+  it("shouldRelayPanelSyncCommand is true for audio channel and related audio writes", () => {
+    expect(shouldRelayPanelSyncCommand(commands.audioInputLevels(0.55, 0.44))).toBe(true);
+    expect(shouldRelayPanelSyncCommand(commands.micLevel(0.5))).toBe(true);
+    expect(shouldRelayPanelSyncCommand(commands.headphoneLevel(0.6))).toBe(true);
+    expect(shouldRelayPanelSyncCommand(commands.speakerLevel(0.4))).toBe(true);
+  });
+
+  it("applyRelayPanelSyncFromCommandBytes mirrors audio input L/R from forwarded joiner bytes", () => {
+    const state = new CameraState();
+    expect(state.applyRelayPanelSyncFromCommandBytes(commands.audioInputLevels(0.72, 0.28))).toBe(true);
+    expect(state.current.audio.inputLevels?.left).toBeCloseTo(0.72, 2);
+    expect(state.current.audio.inputLevels?.right).toBeCloseTo(0.28, 2);
+  });
+
+  it("shouldRelayPanelSyncCommand is true for zoom, project FPS, and off-speed", () => {
+    expect(shouldRelayPanelSyncCommand(commands.zoomNormalised(0.42))).toBe(true);
+    expect(shouldRelayPanelSyncCommand(commands.recordingFormat(50, 50, 1920, 1080))).toBe(true);
+    expect(shouldRelayPanelSyncCommand(commands.offSpeedFrameRate(120))).toBe(true);
+  });
+
   it("ingests auto WB set/restore and clears LED on incoming white balance", () => {
     const state = new CameraState();
     state.ingestIncomingPacket(commands.setAutoWhiteBalance());

@@ -1,7 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, type CameraClient } from "./app";
 import { commands, decodeConfigurationPacket } from "../blackmagic/protocol";
-import { emptyBanksFile, emptyGlobalScenesFile, type Bank, type BanksFile } from "../banks/bank";
+import {
+  emptyBanksFile,
+  emptyGlobalScenesFile,
+  type AtemCcuRelayStored,
+  type Bank,
+  type BanksFile,
+} from "../banks/bank";
 import type { BanksApi } from "../banks/banksClient";
 import { formatNd } from "./panel";
 
@@ -48,6 +54,10 @@ function createFakeBanks(): BanksApi & { state: BanksFile; globalBanks: Array<Ba
     },
     async saveLastState() {
       return undefined;
+    },
+    async saveAtemCcuRelay(_d: string, relay: AtemCcuRelayStored): Promise<void> {
+      state.atemCcuRelay = { ...relay };
+      state.updatedAt = Date.now();
     },
   };
 }
@@ -512,6 +522,28 @@ describe("createApp", () => {
     expect(banks.state.banks[2]).not.toBeNull();
     expect(banks.state.loadedSlot).toBe(2);
     expect(root.querySelector('[data-scene-bank][data-bank-slot="2"]')?.classList.contains("loaded")).toBe(true);
+    expect(root.querySelector("[data-scene-store]")?.classList.contains("armed")).toBe(false);
+  });
+
+  it("STORE disarms after each save — must arm again for another slot", async () => {
+    click(root.querySelector("[data-connect-toggle]")!);
+    await flushPromises();
+
+    click(root.querySelector("[data-scene-store]")!);
+    click(root.querySelector('[data-scene-bank][data-bank-slot="0"]')!);
+    await flushPromises();
+    await flushPromises();
+
+    expect(banks.state.banks[0]).not.toBeNull();
+    expect(root.querySelector("[data-scene-store]")?.classList.contains("armed")).toBe(false);
+
+    click(root.querySelector("[data-scene-store]")!);
+    click(root.querySelector('[data-scene-bank][data-bank-slot="5"]')!);
+    await flushPromises();
+    await flushPromises();
+
+    expect(banks.globalBanks[0]).not.toBeNull();
+    expect(banks.state.globalLoadedSlot).toBe(0);
     expect(root.querySelector("[data-scene-store]")?.classList.contains("armed")).toBe(false);
   });
 

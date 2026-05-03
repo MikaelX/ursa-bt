@@ -1,0 +1,266 @@
+diff --git a/node_modules/@capacitor-community/bluetooth-le/ios/Sources/BluetoothLe/DeviceManager.swift b/node_modules/@capacitor-community/bluetooth-le/ios/Sources/BluetoothLe/DeviceManager.swift
+index f302339..03e2f32 100644
+--- a/node_modules/@capacitor-community/bluetooth-le/ios/Sources/BluetoothLe/DeviceManager.swift
++++ b/node_modules/@capacitor-community/bluetooth-le/ios/Sources/BluetoothLe/DeviceManager.swift
+@@ -95,6 +95,7 @@ class DeviceManager: NSObject, CBCentralManagerDelegate {
+         _ allowDuplicates: Bool,
+         _ deviceListMode: DeviceListMode,
+         _ scanDuration: Double?,
++        _ retrieveConnectedHints: [CBUUID],
+         _ callback: @escaping Callback,
+         _ scanResultCallback: @escaping ScanResultCallback
+     ) {
+@@ -121,11 +122,21 @@ class DeviceManager: NSObject, CBCentralManagerDelegate {
+                 self.stopScanWorkItem = workItem
+                 DispatchQueue.main.asyncAfter(deadline: .now() + scanDuration, execute: workItem)
+             }
++            // Core Bluetooth treats `nil` as "scan all peripherals". Passing an empty
++            // array is not equivalent and can suppress discovery entirely.
++            let scanServiceUUIDs: [CBUUID]? = serviceUUIDs.isEmpty ? nil : serviceUUIDs
+             self.centralManager.scanForPeripherals(
+-                withServices: serviceUUIDs,
++                withServices: scanServiceUUIDs,
+                 options: [CBCentralManagerScanOptionAllowDuplicatesKey: allowDuplicates]
+             )
+ 
++            // Picker: seed list UI. LE scan: also push `retrieveConnectedPeripherals` through the scan callback
++            // (connected devices often never hit `didDiscover`).
++            DispatchQueue.main.async { [weak self] in
++                self?.seedLeScanWithRetrieveConnectedPeripherals(forServiceHints: retrieveConnectedHints)
++                self?.enqueueConnectedPeripherals(forServiceHints: retrieveConnectedHints)
++            }
++
+             if deviceListMode == .none {
+                 self.resolve("startScanning", "Scan started.")
+             }
+@@ -169,14 +180,15 @@ class DeviceManager: NSObject, CBCentralManagerDelegate {
+         rssi RSSI: NSNumber
+     ) {
+ 
+-        guard peripheral.state != CBPeripheralState.connected else {
+-            log("found connected device", peripheral.name ?? "Unknown")
+-            // make sure we do not touch connected devices
++        // requestLEScan: ignore connected peripherals. requestDevice picker: show them —
++        // BM cameras frequently stay `.connected`; iOS may not advertise them again.
++        if peripheral.state == CBPeripheralState.connected && self.deviceListMode == .none {
+             return
+         }
+ 
+-        guard self.passesNameFilter(peripheralName: peripheral.name) else { return }
+-        guard self.passesNamePrefixFilter(peripheralName: peripheral.name) else { return }
++        let filterName = effectivePeripheralName(peripheral: peripheral, advertisementData: advertisementData)
++        guard self.passesNameFilter(peripheralName: filterName) else { return }
++        guard self.passesNamePrefixFilter(peripheralName: filterName) else { return }
+         guard ScanFilterUtils.passesManufacturerDataFilter(advertisementData, filters: self.manufacturerDataFilters) else { return }
+         guard ScanFilterUtils.passesServiceDataFilter(advertisementData, filters: self.serviceDataFilters) else { return }
+ 
+@@ -184,8 +196,10 @@ class DeviceManager: NSObject, CBCentralManagerDelegate {
+         let isNew = self.discoveredPeripherals[deviceId] == nil
+         self.discoveredPeripherals[deviceId] = peripheral
+ 
++        let listLabel = rowLabelForPicker(peripheral: peripheral, advertisementData: advertisementData, rssi: RSSI)
++
+         if isNew || self.allowDuplicates {
+-            log("New device found: ", peripheral.name ?? "Unknown")
++            log("New device found: ", listLabel)
+ 
+             switch deviceListMode {
+             case .none:
+@@ -194,7 +208,7 @@ class DeviceManager: NSObject, CBCentralManagerDelegate {
+                 }
+             case .alert:
+                 DispatchQueue.main.async { [weak self] in
+-                    self?.alertController?.addAction(UIAlertAction(title: peripheral.name ?? "Unknown", style: UIAlertAction.Style.default, handler: { (_) in
++                    self?.alertController?.addAction(UIAlertAction(title: listLabel, style: UIAlertAction.Style.default, handler: { (_) in
+                         log("Selected device")
+                         self?.stopScan()
+                         self?.resolve("startScanning", deviceId)
+@@ -202,7 +216,7 @@ class DeviceManager: NSObject, CBCentralManagerDelegate {
+                 }
+             case .list:
+                 DispatchQueue.main.async { [weak self] in
+-                    self?.deviceListView?.addItem(peripheral.name ?? "Unknown", action: {
++                    self?.deviceListView?.addItem(listLabel, action: {
+                         log("Selected device")
+                         self?.stopScan()
+                         self?.resolve("startScanning", deviceId)
+@@ -355,6 +369,114 @@ class DeviceManager: NSObject, CBCentralManagerDelegate {
+         return self.discoveredPeripherals[deviceId]
+     }
+ 
++    /// Advertised local name (often present when `peripheral.name` is still nil during scan).
++    private func effectivePeripheralName(peripheral: CBPeripheral, advertisementData: [String: Any]) -> String? {
++        if let local = advertisementData[CBAdvertisementDataLocalNameKey] as? String {
++            let t = local.trimmingCharacters(in: .whitespacesAndNewlines)
++            if !t.isEmpty { return t }
++        }
++        if let n = peripheral.name {
++            let t = n.trimmingCharacters(in: .whitespacesAndNewlines)
++            if !t.isEmpty { return t }
++        }
++        return nil
++    }
++
++    /// Picker row when the peripheral is linked on this phone (no fresh advertisement).
++    private func connectedPickerRowLabel(peripheral: CBPeripheral, advertisementData: [String: Any]) -> String {
++        if let name = effectivePeripheralName(peripheral: peripheral, advertisementData: advertisementData) {
++            return "\(name) · on this phone"
++        }
++        let id = peripheral.identifier.uuidString
++        let tail = id.split(separator: "-").last.map(String.init) ?? String(id.suffix(8))
++        return "Bluetooth device · \(tail) · on this phone — tap"
++    }
++
++    private func scannerListLabel(peripheral: CBPeripheral, advertisementData: [String: Any], rssi: NSNumber) -> String {
++        if let name = effectivePeripheralName(peripheral: peripheral, advertisementData: advertisementData) {
++            return name
++        }
++        let id = peripheral.identifier.uuidString
++        let tail = id.split(separator: "-").last.map(String.init) ?? String(id.suffix(8))
++        return "Unknown · \(tail) · \(rssi.intValue) dBm"
++    }
++
++    private func rowLabelForPicker(peripheral: CBPeripheral, advertisementData: [String: Any], rssi: NSNumber) -> String {
++        if peripheral.state == CBPeripheralState.connected && deviceListMode != .none {
++            return connectedPickerRowLabel(peripheral: peripheral, advertisementData: advertisementData)
++        }
++        return scannerListLabel(peripheral: peripheral, advertisementData: advertisementData, rssi: rssi)
++    }
++
++    /// For passive `requestLEScan`, deliver peripherals that are already connected for the hinted service(s).
++    /// iOS often keeps cameras connected without fresh advertisements, so `didDiscover` never fires.
++    private func seedLeScanWithRetrieveConnectedPeripherals(forServiceHints hints: [CBUUID]) {
++        guard self.deviceListMode == .none else { return }
++        guard hints.isEmpty == false else { return }
++        guard let scanCb = self.scanResultCallback else { return }
++
++        let emptyAdv = [String: Any]()
++        let synthRssi = NSNumber(value: 0)
++
++        for peripheral in centralManager.retrieveConnectedPeripherals(withServices: hints) {
++            guard peripheral.state == CBPeripheralState.connected else { continue }
++
++            let filterName = effectivePeripheralName(peripheral: peripheral, advertisementData: emptyAdv)
++            guard self.passesNameFilter(peripheralName: filterName) else { continue }
++            guard self.passesNamePrefixFilter(peripheralName: filterName) else { continue }
++            guard ScanFilterUtils.passesManufacturerDataFilter(emptyAdv, filters: self.manufacturerDataFilters) else { continue }
++            guard ScanFilterUtils.passesServiceDataFilter(emptyAdv, filters: self.serviceDataFilters) else { continue }
++
++            let deviceId = peripheral.identifier.uuidString
++            let isNew = self.discoveredPeripherals[deviceId] == nil
++            self.discoveredPeripherals[deviceId] = peripheral
++
++            let listLabel = rowLabelForPicker(peripheral: peripheral, advertisementData: emptyAdv, rssi: synthRssi)
++            if isNew || self.allowDuplicates {
++                log("LE scan seeded connected peripheral: ", listLabel)
++                scanCb(peripheral, emptyAdv, synthRssi)
++            }
++        }
++    }
++
++    /// Peripherals that already hold a GATT session with this app/iOS rarely show up via `didDiscover`.
++    private func enqueueConnectedPeripherals(forServiceHints hints: [CBUUID]) {
++        guard self.deviceListMode != .none, hints.isEmpty == false else { return }
++
++        let emptyAdv = [String: Any]()
++        for peripheral in centralManager.retrieveConnectedPeripherals(withServices: hints) {
++            guard peripheral.state == CBPeripheralState.connected else { continue }
++            let filterName = effectivePeripheralName(peripheral: peripheral, advertisementData: emptyAdv)
++            guard self.passesNameFilter(peripheralName: filterName) else { continue }
++            guard self.passesNamePrefixFilter(peripheralName: filterName) else { continue }
++
++            let deviceId = peripheral.identifier.uuidString
++            let isNew = self.discoveredPeripherals[deviceId] == nil
++            self.discoveredPeripherals[deviceId] = peripheral
++            guard isNew || self.allowDuplicates else { continue }
++
++            let listLabel = connectedPickerRowLabel(peripheral: peripheral, advertisementData: emptyAdv)
++            log("Picker seeded connected peripheral: ", listLabel)
++
++            switch deviceListMode {
++            case .none:
++                break
++            case .alert:
++                alertController?.addAction(UIAlertAction(title: listLabel, style: UIAlertAction.Style.default, handler: { [weak self] (_) in
++                    log("Selected device")
++                    self?.stopScan()
++                    self?.resolve("startScanning", deviceId)
++                }))
++            case .list:
++                deviceListView?.addItem(listLabel, action: { [weak self] in
++                    log("Selected device")
++                    self?.stopScan()
++                    self?.resolve("startScanning", deviceId)
++                })
++            }
++        }
++    }
++
+     private func passesNameFilter(peripheralName: String?) -> Bool {
+         guard let nameFilter = self.deviceNameFilter else { return true }
+         guard let name = peripheralName else { return false }
+diff --git a/node_modules/@capacitor-community/bluetooth-le/ios/Sources/BluetoothLe/Plugin.swift b/node_modules/@capacitor-community/bluetooth-le/ios/Sources/BluetoothLe/Plugin.swift
+index 37b8668..bcfbda1 100644
+--- a/node_modules/@capacitor-community/bluetooth-le/ios/Sources/BluetoothLe/Plugin.swift
++++ b/node_modules/@capacitor-community/bluetooth-le/ios/Sources/BluetoothLe/Plugin.swift
+@@ -169,6 +169,11 @@ public class BluetoothLe: CAPPlugin, CAPBridgedPlugin {
+             }
+             let deviceListMode: DeviceListMode = displayModeString == "list" ? .list : .alert
+ 
++            let retrieveConnectedHints = Self.mergedRetrieveHintUuids(
++                scan: serviceUUIDs,
++                optional: self.getOptionalServiceUUIDs(call)
++            )
++
+             deviceManager.startScanning(
+                 serviceUUIDs,
+                 name,
+@@ -178,6 +183,7 @@ public class BluetoothLe: CAPPlugin, CAPBridgedPlugin {
+                 false,
+                 deviceListMode,
+                 30,
++                retrieveConnectedHints,
+                 {(success, message) in
+                     if success {
+                         guard let peripheral = deviceManager.getPeripheral(message) else {
+@@ -206,6 +212,7 @@ public class BluetoothLe: CAPPlugin, CAPBridgedPlugin {
+             let allowDuplicates = call.getBool("allowDuplicates", false)
+             let manufacturerDataFilters = self.getManufacturerDataFilters(call)
+             let serviceDataFilters = self.getServiceDataFilters(call)
++            let retrieveHints = Self.mergedRetrieveHintUuids(scan: serviceUUIDs, optional: self.getOptionalServiceUUIDs(call))
+ 
+             deviceManager.startScanning(
+                 serviceUUIDs,
+@@ -216,6 +223,7 @@ public class BluetoothLe: CAPPlugin, CAPBridgedPlugin {
+                 allowDuplicates,
+                 .none,
+                 nil,
++                retrieveHints,
+                 { (success, message) in
+                     if success {
+                         call.resolve()
+@@ -611,6 +619,24 @@ public class BluetoothLe: CAPPlugin, CAPBridgedPlugin {
+         return serviceUUIDs
+     }
+ 
++    private func getOptionalServiceUUIDs(_ call: CAPPluginCall) -> [CBUUID] {
++        let optional = call.getArray("optionalServices", String.self) ?? []
++        return optional.map { CBUUID(string: $0) }
++    }
++
++    /// Union scan `services` + `optionalServices` for `retrieveConnectedPeripherals` hints (JS lists BM GATT under optional on broad scans).
++    private static func mergedRetrieveHintUuids(scan: [CBUUID], optional: [CBUUID]) -> [CBUUID] {
++        var seen = Set<String>()
++        var out: [CBUUID] = []
++        for u in scan + optional {
++            let key = u.uuidString.lowercased()
++            if seen.insert(key).inserted {
++                out.append(u)
++            }
++        }
++        return out
++    }
++
+     private func getManufacturerDataFilters(_ call: CAPPluginCall) -> [ManufacturerDataFilter]? {
+         guard let manufacturerDataArray = call.getArray("manufacturerData") else {
+             return nil

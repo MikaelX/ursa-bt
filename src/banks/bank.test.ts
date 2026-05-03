@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { applyBankToCamera, buildBankFromSnapshot, type Bank } from "./bank";
+import { applyBankToCamera, buildBankFromSnapshot, resolvedBodyCameraIdFromBank, type Bank } from "./bank";
 import { commands, decodeConfigurationPacket } from "../blackmagic/protocol";
 import type { CameraSnapshot } from "../blackmagic/cameraState";
 
@@ -85,6 +85,16 @@ describe("applyBankToCamera", () => {
     expect(bank.ndFilterStops).toBe(0);
     expect(bank.ndFilterDisplayMode).toBe(0);
     expect(bank.unitOutputs).toEqual({ colorBars: false, programReturnFeed: false });
+  });
+
+  it("resolvedBodyCameraIdFromBank prefers cameraNumber and accepts numeric metadataCameraId", () => {
+    const color = snapshotFixture().color;
+    expect(resolvedBodyCameraIdFromBank(null)).toBeUndefined();
+    expect(resolvedBodyCameraIdFromBank(undefined)).toBeUndefined();
+    expect(resolvedBodyCameraIdFromBank({ color, metadataCameraId: "7" } as Bank)).toBe(7);
+    expect(resolvedBodyCameraIdFromBank({ color, cameraNumber: 4, metadataCameraId: "9" } as Bank)).toBe(4);
+    expect(resolvedBodyCameraIdFromBank({ color, metadataCameraId: "CamA" } as Bank)).toBeUndefined();
+    expect(resolvedBodyCameraIdFromBank({ color, cameraNumber: 0 } as Bank)).toBeUndefined();
   });
 
   it("buildBankFromSnapshot captures audio settings, cameraNumber and ND filter", () => {

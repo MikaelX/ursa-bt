@@ -1,6 +1,12 @@
-/** Shared contract used by BLE client and relay-join shim. */
 import type { ConnectionState } from "../blackmagic/bleClient";
 
+/**
+ * @file cameraClientTypes.ts
+ *
+ * bm-bluetooth — Narrow transport interface shared by Chromium WebBluetooth, Capacitor native BLE, relay join stubs, etc.
+ */
+
+/** Commands + lifecycle slots common to BLE + relay transports. */
 export interface CameraClient {
   readonly isSupported: boolean;
   readonly isConnected: boolean;

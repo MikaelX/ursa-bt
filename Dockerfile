@@ -4,6 +4,9 @@
 FROM node:22-alpine AS build
 WORKDIR /app
 
+ARG ENVIRONMENT=production
+ENV ENVIRONMENT=${ENVIRONMENT}
+
 COPY package.json package-lock.json* ./
 RUN npm ci
 
@@ -22,7 +25,8 @@ ENV NODE_ENV=production \
     STATIC_DIR=/app/dist
 
 COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev
+# Production runtime has no patches/; postinstall would invoke patch-package (dev-only).
+RUN npm ci --omit=dev --ignore-scripts
 
 COPY server ./server
 COPY src/banks ./src/banks

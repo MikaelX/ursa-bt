@@ -2,6 +2,19 @@ import type { ConnectionState } from "../blackmagic/bleClient";
 import type { CameraClient } from "../ui/cameraClientTypes";
 import { getRelaySocketUrl } from "./relayUrl";
 
+/**
+ * @file relayJoinCameraClient.ts
+ *
+ * bm-bluetooth — WebSocket-only {@link CameraClient}: join an existing relay session id, forward outbound command bytes
+ * to the BLE host (`forward_cmd`), and consume relayed status snapshots / ingress hex for UI parity without local GATT.
+ *
+ * **Private** repo.
+ */
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Wire messages (minimal join-forward protocol)
+// ─────────────────────────────────────────────────────────────────────────────
+
 type JoinWire =
   | { type: "join"; sessionId: string }
   | { type: "joined"; sessionName: string; deviceId: string }
@@ -13,6 +26,10 @@ type JoinWire =
 function hexEncode(bytes: Uint8Array): string {
   return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RelayJoinedCameraClient (join-side transport delegating BLE to host)
+// ─────────────────────────────────────────────────────────────────────────────
 
 /** Join-only: commands go through relay (host executes BLE writes). */
 export class RelayJoinedCameraClient implements CameraClient {

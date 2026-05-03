@@ -6,11 +6,21 @@ import {
   BANK_COUNT,
   GLOBAL_SCENE_COUNT,
   emptyBanksFile,
+  type AtemCcuRelayStored,
   type Bank,
   type BanksFile,
 } from "../src/banks/bank.js";
 import { BANKS_DEV_PORT } from "../src/banks/devServerPort.js";
 import { RelayCoordinator } from "./relay/coordinator.js";
+
+/**
+ * @file index.ts (`server`)
+ *
+ * bm-bluetooth — Banks HTTP API backed by **`data/cameras.json`**, relay session listing (`RelayCoordinator` + Redis),
+ * and optional **`STATIC_DIR`** hosting of the built Vite bundle.
+ *
+ * **Private** repo.
+ */
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_FILE = process.env.DATA_FILE
@@ -37,6 +47,10 @@ const MIME_TYPES: Record<string, string> = {
   ".map": "application/json; charset=utf-8",
   ".txt": "text/plain; charset=utf-8",
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Banks JSON persistence (`data/cameras.json`)
+// ─────────────────────────────────────────────────────────────────────────────
 
 interface Database {
   cameras: Record<string, BanksFile>;
@@ -164,6 +178,34 @@ async function saveLastState(deviceId: string, state: Bank): Promise<void> {
   await persist();
 }
 
+async function saveAtemCcuRelay(deviceId: string, body: unknown): Promise<BanksFile> {
+  if (!body || typeof body !== "object") throw new HttpError(400, "Expected JSON object");
+  const o = body as Record<string, unknown>;
+  const address = String(o.address ?? "").trim();
+  const cam = Math.round(Number(o.cameraId));
+  if (!address) throw new HttpError(400, "address required");
+  if (!Number.isFinite(cam) || cam < 1 || cam > 24) throw new HttpError(400, "cameraId must be 1..24");
+  const sessionName =
+    o.sessionName !== undefined && o.sessionName !== null ? String(o.sessionName).trim().slice(0, 120) : undefined;
+  let port: number | undefined;
+  if (o.port !== undefined && o.port !== null) {
+    port = Math.round(Number(o.port));
+    if (!Number.isFinite(port) || port < 1 || port > 65535) throw new HttpError(400, "port must be 1..65535");
+  }
+  const relay: AtemCcuRelayStored = { address, cameraId: cam, sessionName, port };
+  const db = await readDb();
+  const file = db.cameras[deviceId] ?? emptyBanksFile();
+  file.atemCcuRelay = relay;
+  file.updatedAt = Date.now();
+  db.cameras[deviceId] = file;
+  await persist();
+  return file;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HTTP façade helpers (`readJson`, `send`, routing table)
+// ─────────────────────────────────────────────────────────────────────────────
+
 class HttpError extends Error {
   constructor(public readonly status: number, message: string) {
     super(message);
@@ -194,6 +236,10 @@ function send(res: ServerResponse, status: number, body: unknown, extraHeaders?:
   res.end(payload);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Route table / relay coordinator singleton
+// ─────────────────────────────────────────────────────────────────────────────
+
 const ROUTES = {
   banks: /^\/api\/cameras\/([^/]+)\/banks$/,
   bankSlot: /^\/api\/cameras\/([^/]+)\/banks\/(\d+)$/,
@@ -201,10 +247,15 @@ const ROUTES = {
   globalScenes: /^\/api\/global\/scenes\/?$/,
   cameraGlobalSceneSlot: /^\/api\/cameras\/([^/]+)\/global-scenes\/(\d+)$/,
   state: /^\/api\/cameras\/([^/]+)\/state$/,
+  atemCcuRelay: /^\/api\/cameras\/([^/]+)\/atem-ccu-relay$/,
   relaySessions: /^\/api\/relay\/sessions\/?$/,
 };
 
 const relayCoordinator = new RelayCoordinator(process.env.REDIS_URL);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// `handle()` + optional static SPA (`STATIC_DIR`)
+// ─────────────────────────────────────────────────────────────────────────────
 
 async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = req.url ?? "";
@@ -254,6 +305,13 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const state = (await readJson(req)) as Bank;
     await saveLastState(decodeURIComponent(match[1]!), state);
     send(res, 204, undefined);
+    return;
+  }
+
+  if ((match = url.match(ROUTES.atemCcuRelay)) && method === "PUT") {
+    const body = await readJson(req);
+    const file = await saveAtemCcuRelay(decodeURIComponent(match[1]!), body);
+    send(res, 200, file);
     return;
   }
 
@@ -332,5 +390,11 @@ server.listen(PORT, () => {
   console.log(`  data file: ${DATA_FILE}`);
   if (STATIC_DIR) console.log(`  static dir: ${STATIC_DIR}`);
   console.log(`  relay ws: ws://localhost:${PORT}/api/relay/socket`);
-  console.log(`  redis: ${process.env.REDIS_URL ? "enabled" : "disabled (single-node fanout)"}`);
+  console.log(
+    `  redis: ${
+      process.env.REDIS_URL?.trim()
+        ? "enabled (relay coordinates across instances)"
+        : "not configured — single-node relay only; set REDIS_URL if you run more than one replica"
+    }`,
+  );
 });

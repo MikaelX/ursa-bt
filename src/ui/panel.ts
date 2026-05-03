@@ -2,6 +2,19 @@ import type { CameraSnapshot } from "../blackmagic/cameraState";
 import { BANK_COUNT, SCENE_SLOT_COUNT } from "../banks/bank";
 import { formatSegSignedFixed2, populateSegSlots } from "./segmentDisplay";
 
+/**
+ * @file panel.ts
+ *
+ * bm-bluetooth — Static HTML template for the multi-tab control surface, view routing (`VIEW_IDS`), iOS WebBluetooth helpers,
+ * fader/iris/paint geometry, and {@link updatePanel} diffing that mirrors {@link CameraSnapshot} into the DOM.
+ *
+ * Kept colocated with `src/styles.css` / `patterns/*`. **Private** repo.
+ */
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Paint / camera constants & micro-templates
+// ─────────────────────────────────────────────────────────────────────────────
+
 export const CAMERA_COUNT = 8;
 export const PAINT_CHANNELS = ["red", "green", "blue", "luma"] as const;
 export type PaintChannel = (typeof PAINT_CHANNELS)[number];
@@ -200,6 +213,10 @@ function renderColorHFader(
   `;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// iOS Web Bluetooth affordances (Bluefy + onboarding modals)
+// ─────────────────────────────────────────────────────────────────────────────
+
 /** App Store — Bluefy (Web Bluetooth browser for iOS). */
 export const BLUEFY_APP_STORE_URL = "https://apps.apple.com/app/bluefy-web-ble-browser/id1492822055";
 
@@ -383,7 +400,7 @@ export function webBluetoothUnsupportedDetail(): string {
 // View navigation — split the panel into self-contained mobile-first views.
 // ---------------------------------------------------------------------------
 
-export const VIEW_IDS = ["connect", "settings", "iris", "audio", "video", "color", "debug"] as const;
+export const VIEW_IDS = ["connect", "settings", "audio", "iris", "video", "color", "debug"] as const;
 export type ViewId = (typeof VIEW_IDS)[number];
 
 /** Views where the persistent scene file bar is visible above the bottom nav. */
@@ -391,7 +408,7 @@ export const SCENE_BAR_VIEWS: ReadonlySet<ViewId> = new Set<ViewId>(["settings"]
 
 const VIEW_LABELS: Record<ViewId, string> = {
   connect: "Connect",
-  settings: "Settings",
+  settings: "Exposure",
   iris: "Iris",
   audio: "Audio",
   video: "Video",
@@ -425,7 +442,30 @@ const VIEW_LEGACY_ALIAS: Partial<Record<ViewId, string>> = {
 
 function renderViewNav(): string {
   return `
-    <nav class="view-nav" role="tablist" aria-label="Camera control sections" data-view-nav>
+    <div class="view-nav-shell">
+      <div class="view-nav-accent" aria-hidden="true">
+        <svg class="view-nav-accent__svg" viewBox="0 0 400 28" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="navAccentHalo" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="400" y2="0">
+              <stop offset="0%" stop-color="#283038" stop-opacity="0"/>
+              <stop offset="38%" stop-color="#ffd070" stop-opacity="0.35"/>
+              <stop offset="50%" stop-color="#fff2cf" stop-opacity="0.62"/>
+              <stop offset="62%" stop-color="#ffd070" stop-opacity="0.35"/>
+              <stop offset="100%" stop-color="#283038" stop-opacity="0"/>
+            </linearGradient>
+            <linearGradient id="navAccentStroke" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="400" y2="0">
+              <stop offset="0%" stop-color="#2f3540"/>
+              <stop offset="40%" stop-color="#c4974e"/>
+              <stop offset="50%" stop-color="#ffe9bc"/>
+              <stop offset="60%" stop-color="#c4974e"/>
+              <stop offset="100%" stop-color="#2f3540"/>
+            </linearGradient>
+          </defs>
+          <path d="M0 21 Q 96 17 200 10 Q 304 17 400 21" fill="none" stroke="url(#navAccentHalo)" stroke-width="11" stroke-linecap="round"/>
+          <path d="M0 20.5 Q 100 15 200 9 Q 300 15 400 20.5" fill="none" stroke="url(#navAccentStroke)" stroke-width="2.15" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <nav class="view-nav" role="tablist" aria-label="Camera control sections" data-view-nav>
       ${VIEW_IDS.map((id, idx) => {
         const alias = VIEW_LEGACY_ALIAS[id] ? ` ${VIEW_LEGACY_ALIAS[id]}` : "";
         return `
@@ -444,7 +484,8 @@ function renderViewNav(): string {
           </button>
         `;
       }).join("")}
-    </nav>
+      </nav>
+    </div>
   `;
 }
 
@@ -481,7 +522,48 @@ function renderAppHeader(bleAvailable: boolean): string {
   `;
 }
 
-function renderConnectView(bleAvailable: boolean): string {
+function renderConnectView(bleAvailable: boolean, bleUi?: PanelBleUiOptions): string {
+  const atemLan =
+    bleUi?.showAtemLanConnect === true
+      ? `
+      <div class="card connect-atem-card" data-atem-ccu-lan-card>
+        <div class="connect-atem-head">
+          <p class="eyebrow connect-atem-eyebrow">ATEM mixer</p>
+          <h2 class="connect-atem-title">LAN camera control</h2>
+        </div>
+        <p class="muted connect-atem-hint">
+          Hub must reach the switcher on your LAN (e.g. <code class="connect-atem-code">npm run dev:server</code>). Same CCU path as Share → ATEM.
+        </p>
+        <div class="connect-atem-row">
+          <label class="connect-atem-inline-field connect-atem-inline-field--address">
+            <span class="connect-atem-inline-label">Address</span>
+            <input
+              type="text"
+              data-atem-ccu-ip
+              autocomplete="off"
+              placeholder="192.168.1.199"
+              enterkeyhint="go"
+            />
+          </label>
+          <label class="connect-atem-inline-field connect-atem-inline-field--camera">
+            <span class="connect-atem-inline-label">Camera</span>
+            <input
+              type="number"
+              data-atem-ccu-camera
+              min="1"
+              max="24"
+              step="1"
+            />
+          </label>
+          <button type="button" class="bm-btn connect-primary connect-atem-connect-btn" data-atem-ccu-lan-connect data-control>
+            Connect
+          </button>
+        </div>
+        <p class="muted connect-atem-status" data-atem-ccu-lan-status hidden></p>
+      </div>
+    `
+      : "";
+
   return `
     <section class="view view--connect" data-view="connect" id="view-connect" role="tabpanel" aria-labelledby="tab-connect">
       <div class="card connect-card">
@@ -501,9 +583,14 @@ function renderConnectView(bleAvailable: boolean): string {
               <span data-power-label>Power On</span>
             </button>
           </div>
+          <div class="last-ble-row" data-last-ble-row hidden>
+            <button type="button" class="bm-btn last-ble-reconnect-btn" data-last-ble-reconnect data-control>
+              Last camera
+            </button>
+          </div>
           <label class="auto-reconnect-toggle">
             <input data-auto-reconnect type="checkbox" checked />
-            Auto-reconnect (BLE drop, relay join drop/reload)
+            Auto-reconnect (BLE: every 20s to last device after a drop; relay join drop/reload; off after manual Disconnect)
           </label>
           <p class="connect-relay-hint">
             Connect pairs over Bluetooth; Join opens remote sessions when you are not the BLE host. The same hub buttons switch to Disconnect, Leave, or Stop sharing when active.
@@ -512,9 +599,20 @@ function renderConnectView(bleAvailable: boolean): string {
             <h3 class="relay-sessions-inline-title">Hosted sessions</h3>
             <ul class="relay-session-list relay-session-list--inline" data-relay-session-list-inline aria-live="polite"></ul>
             <p class="relay-session-empty muted" data-relay-inline-empty hidden></p>
+            <div class="native-ble-found-inline" data-native-ble-found hidden>
+              <h3 class="relay-sessions-inline-title native-ble-found-title">Found devices</h3>
+              <p class="native-ble-found-hint muted">
+                Only Blackmagic cameras (by advertised name or camera-control service) appear here; tap to connect. Entries marked “on this phone” are already linked via Bluetooth.
+                Use Connect for the system picker if yours does not advertise in a way we can detect.
+              </p>
+              <button class="bm-btn native-ble-rescan-btn" type="button" data-native-ble-rescan>Rescan</button>
+              <ul class="relay-session-list relay-session-list--inline" data-native-ble-found-list aria-live="polite"></ul>
+              <p class="relay-session-empty muted" data-native-ble-found-empty hidden>Scanning for Blackmagic cameras…</p>
+            </div>
           </div>
         </div>
       </div>
+      ${atemLan}
 
       <div class="card connect-camera-picker" data-connect-camera-id-card hidden>
         <div class="card-header">
@@ -604,6 +702,7 @@ function renderSettingsView(): string {
             </div>
           </div>
         </div>
+        <p class="settings-version muted" data-settings-version role="note"></p>
       </div>
     </section>
   `;
@@ -625,7 +724,97 @@ function renderIrisView(): string {
           </div>
         </div>
 
+        <div class="iris-stage-accent" aria-hidden="true">
+          <svg class="iris-stage-accent__svg" viewBox="0 0 400 26" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <linearGradient id="irisAccentLine" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="400" y2="0">
+                <stop offset="0%" stop-color="#323841"/>
+                <stop offset="38%" stop-color="#d4a556"/>
+                <stop offset="50%" stop-color="#ffe8b8"/>
+                <stop offset="62%" stop-color="#d4a556"/>
+                <stop offset="100%" stop-color="#323841"/>
+              </linearGradient>
+              <linearGradient id="irisAccentHalo" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="400" y2="0">
+                <stop offset="0%" stop-color="#283038" stop-opacity="0"/>
+                <stop offset="40%" stop-color="#ffd070" stop-opacity="0.45"/>
+                <stop offset="50%" stop-color="#fff6dc" stop-opacity="0.75"/>
+                <stop offset="60%" stop-color="#ffd070" stop-opacity="0.45"/>
+                <stop offset="100%" stop-color="#283038" stop-opacity="0"/>
+              </linearGradient>
+            </defs>
+            <path
+              d="M0 19 Q 96 13 200 9 Q 304 13 400 19"
+              fill="none"
+              stroke="url(#irisAccentHalo)"
+              stroke-width="10"
+              stroke-linecap="round"
+            />
+            <path
+              d="M0 18.5 Q 100 11.5 200 8 Q 300 11.5 400 18.5"
+              fill="none"
+              stroke="url(#irisAccentLine)"
+              stroke-width="2.25"
+              stroke-linecap="round"
+            />
+          </svg>
+        </div>
+
         <div class="iris-stage-grid">
+          <div class="iris-side-column iris-side-column--left">
+            <div class="iris-side-buttons iris-side-buttons--left">
+              <button class="bm-btn side-btn" type="button" data-iris-mb-active data-control>IRIS/MB<br />ACTIVE</button>
+              <button class="bm-btn side-btn" type="button" data-auto-aperture data-control>AUTO<br />IRIS</button>
+              <button class="bm-btn side-btn" type="button" data-autofocus data-control>AUTO<br />FOCUS</button>
+              <button
+                class="bm-btn bm-btn--call side-btn"
+                type="button"
+                data-record-start
+                data-control
+                aria-pressed="false"
+                aria-label="Start recording"
+              >
+                REC
+              </button>
+            </div>
+
+            <div class="iris-focus-cell iris-side-lens-cell" data-iris-focus-cell data-active="false">
+              <div class="iris-focus-head">
+                <span class="iris-focus-title">FOCUS</span>
+                <button
+                  class="bm-btn iris-focus-toggle"
+                  type="button"
+                  data-iris-focus-toggle
+                  aria-pressed="false"
+                  aria-label="Toggle focus control active"
+                >
+                  <span class="iris-focus-toggle-led"></span>
+                  <span>ACTIVE</span>
+                </button>
+                ${renderSegReadout("focus", "iris-focus-readout bm-seg--green", 'role="status"')}
+              </div>
+              <div class="h-fader iris-focus-fader app-bm-hfader-inline" data-control aria-label="Focus (horizontal drag)" style="--thumb-w:22px;--thumb-h:12px;--track-h:5px;">
+                <div class="h-fader-scale">
+                  <span>NEAR</span>
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                  <span>FAR</span>
+                </div>
+                <div class="bm-fader__channel iris-focus-fader__channel" data-h-fader="focus">
+                  <div class="bm-fader__track">
+                    <span class="bm-fader__meter" aria-hidden="true" style="--meter:0"></span>
+                    <span class="bm-fader__ticks" aria-hidden="true"></span>
+                  </div>
+                  <div class="bm-fader__thumb" data-h-fader-handle>
+                    <span class="bm-fader__cap"></span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <div class="iris-primary">
             <div class="bm-tbar app-bm-iris-tbar iris-joystick iris-joystick--xl" data-iris-joystick data-control aria-label="Iris (vertical drag)">
               <div class="bm-tbar__shaft" aria-hidden="true">
@@ -634,7 +823,7 @@ function renderIrisView(): string {
                 <span class="bm-tbar__ladder"></span>
                 <span class="bm-tbar__slot"></span>
                 <div class="iris-joystick-scale app-bm-iris-tbar-scale">
-                  <span>L</span>
+                  <span>OPEN</span>
                   <span>8.0</span>
                   <span>11</span>
                   <span>16</span>
@@ -660,29 +849,45 @@ function renderIrisView(): string {
             <span class="iris-label">IRIS</span>
           </div>
 
-          <div class="iris-side-buttons">
-            <button class="bm-btn side-btn" type="button" data-iris-mb-active data-control>IRIS/MB<br />ACTIVE</button>
-            <button class="bm-btn side-btn" type="button" data-auto-aperture data-control>AUTO<br />IRIS</button>
-            <button class="bm-btn side-btn" type="button" data-autofocus data-control>AUTO<br />FOCUS</button>
-            <button
-              class="bm-btn bm-btn--call side-btn"
-              type="button"
-              data-record-start
-              data-control
-              aria-pressed="false"
-              aria-label="Start recording"
-            >
-              REC
-            </button>
-            <button class="bm-btn side-btn" type="button" data-record-stop data-control>STOP</button>
-            <button class="bm-btn side-btn" type="button" data-still-capture data-control>STILL</button>
-            <button class="bm-btn side-btn" type="button" data-preview data-control>PREVIEW</button>
-            <button class="bm-btn side-btn" type="button" data-call data-control>CALL</button>
+          <div class="iris-side-column iris-side-column--right">
+            <div class="iris-side-buttons iris-side-buttons--right">
+              <button class="bm-btn side-btn" type="button" data-record-stop data-control>STOP</button>
+              <button class="bm-btn side-btn" type="button" data-still-capture data-control>STILL</button>
+              <button class="bm-btn side-btn" type="button" data-preview data-control>PREVIEW</button>
+              <button class="bm-btn side-btn" type="button" data-call data-control>CALL</button>
+            </div>
+
+            <div class="iris-zoom-cell iris-side-lens-cell" data-control>
+              <div class="iris-zoom-head">
+                <span class="iris-zoom-title">ZOOM</span>
+                ${renderSegReadout("zoom", "iris-zoom-readout bm-seg--green", 'role="status"')}
+              </div>
+              <div class="h-fader iris-zoom-fader app-bm-hfader-inline" aria-label="Zoom (horizontal drag)" style="--thumb-w:22px;--thumb-h:12px;--track-h:5px;">
+                <div class="h-fader-scale">
+                  <span>WIDE</span>
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                  <span>TIGHT</span>
+                </div>
+                <div class="bm-fader__channel iris-zoom-fader__channel" data-h-fader="zoom">
+                  <div class="bm-fader__track">
+                    <span class="bm-fader__meter" aria-hidden="true" style="--meter:0"></span>
+                    <span class="bm-fader__ticks" aria-hidden="true"></span>
+                  </div>
+                  <div class="bm-fader__thumb" data-h-fader-handle>
+                    <span class="bm-fader__cap"></span>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
         <div class="iris-secondary">
-          <div class="knob-cell iris-mb-cell" data-iris-mb-cell>
+          <div class="knob-cell iris-mb-cell" data-iris-mb-cell">
             <div class="iris-mb-bm-pot bm-pot">
               <div
                 class="bm-pot__knob iris-mb-knob"
@@ -702,43 +907,6 @@ function renderIrisView(): string {
             <div class="knob-meta">
               <span class="knob-label">Master Black</span>
               <span class="knob-value" data-readout="masterBlackReadout">+0.00</span>
-            </div>
-          </div>
-
-          <div class="iris-focus-cell" data-iris-focus-cell data-active="false">
-            <div class="iris-focus-head">
-              <span class="iris-focus-title">FOCUS</span>
-              <button
-                class="bm-btn iris-focus-toggle"
-                type="button"
-                data-iris-focus-toggle
-                aria-pressed="false"
-                aria-label="Toggle focus control active"
-              >
-                <span class="iris-focus-toggle-led"></span>
-                <span>ACTIVE</span>
-              </button>
-              ${renderSegReadout("focus", "iris-focus-readout bm-seg--green", 'role="status"')}
-            </div>
-            <div class="h-fader iris-focus-fader app-bm-hfader-inline" data-control aria-label="Focus (horizontal drag)" style="--thumb-w:26px;--thumb-h:14px;--track-h:6px;">
-              <div class="h-fader-scale">
-                <span>NEAR</span>
-                <span></span>
-                <span></span>
-                <span></span>
-                <span></span>
-                <span></span>
-                <span>FAR</span>
-              </div>
-              <div class="bm-fader__channel iris-focus-fader__channel" data-h-fader="focus">
-                <div class="bm-fader__track">
-                  <span class="bm-fader__meter" aria-hidden="true" style="--meter:0"></span>
-                  <span class="bm-fader__ticks" aria-hidden="true"></span>
-                </div>
-                <div class="bm-fader__thumb" data-h-fader-handle>
-                  <span class="bm-fader__cap"></span>
-                </div>
-              </div>
             </div>
           </div>
         </div>
@@ -830,6 +998,34 @@ function renderVideoView(): string {
               <button class="segmented-option" type="button" data-control data-value="1" role="radio" aria-checked="false">Low</button>
               <button class="segmented-option" type="button" data-control data-value="2" role="radio" aria-checked="false">Medium</button>
               <button class="segmented-option" type="button" data-control data-value="3" role="radio" aria-checked="false">High</button>
+            </div>
+          </div>
+
+          <div class="video-row video-row-grid">
+            <label>
+              <span class="video-row-label">Project FPS</span>
+              <select data-video-frame-rate data-control title="Requires live resolution from camera (see FORMAT on Iris tab)">
+                <option value="">Apply when ready…</option>
+                <option value="23">23</option>
+                <option value="24">24</option>
+                <option value="25">25</option>
+                <option value="29">29</option>
+                <option value="30">30</option>
+                <option value="47">47</option>
+                <option value="48">48</option>
+                <option value="50">50</option>
+                <option value="59">59</option>
+                <option value="60">60</option>
+                <option value="100">100</option>
+                <option value="120">120</option>
+              </select>
+            </label>
+            <div class="video-offspeed-field">
+              <label>
+                <span class="video-row-label">Off-speed FPS</span>
+                <input type="number" min="0" step="1" data-video-off-speed-rate data-control placeholder="—" />
+              </label>
+              <button class="bm-btn" type="button" data-video-off-speed-apply data-control>Apply</button>
             </div>
           </div>
 
@@ -954,6 +1150,13 @@ function renderDebugView(): string {
       </section>
 
       <section class="card">
+        <label class="debug-atem-sync-toggle">
+          <input type="checkbox" data-debug-atem-sync />
+          <span>Compact ATEM CCU trace in Debug log. Optional: <code>localStorage</code> key <code>bm-debug-atem-ccu-json=1</code> for full JSON lines.</span>
+        </label>
+        <p class="muted debug-atem-sync-hint">
+          One line per update, e.g. <code>[ccu h] time 22:33:58.444 │ camera 7 │ note atem_wire │ lens: iris 5.63, gain 0 dB │ FairlightMixerSourceUpdateCommand — gain -525, fader -740, balance 2250</code>. Host <code>h</code>, joiner <code>j</code>.
+        </p>
         <div class="log-header">
           <h2>Debug Log</h2>
           <button class="bm-btn" type="button" data-clear-log>Clear</button>
@@ -1008,15 +1211,29 @@ function renderRelayModals(): string {
         class="relay-modal"
       >
         <h2 id="relay-host-title" class="relay-modal-title">Relay session name</h2>
-        <p class="relay-modal-body">Guests will see this name in Join. Stored per camera device.</p>
+        <p class="relay-modal-body">Shown to guests in Join. A default name is saved on this phone.</p>
         <label class="relay-modal-field">
           <span class="relay-modal-label">Session name</span>
           <input type="text" data-relay-host-name maxlength="120" autocomplete="off" />
         </label>
         <label class="relay-modal-check">
           <input type="checkbox" data-relay-host-share checked />
-          Share session (start relay immediately)
+          <span class="relay-modal-check-text">Share session (start relay now)</span>
         </label>
+        <label class="relay-modal-check">
+          <input type="checkbox" data-relay-host-atem-ccu />
+          <span class="relay-modal-check-text">ATEM CCU shared session (switcher on the banks server LAN)</span>
+        </label>
+        <div class="relay-modal-field-group" data-relay-host-atem-fields hidden>
+          <label class="relay-modal-field">
+            <span class="relay-modal-label">ATEM IP or hostname</span>
+            <input type="text" data-relay-host-atem-address autocomplete="off" placeholder="192.168.1.199" />
+          </label>
+          <label class="relay-modal-field">
+            <span class="relay-modal-label">Camera index (1–8)</span>
+            <input type="number" data-relay-host-atem-camera min="1" max="24" step="1" />
+          </label>
+        </div>
         <div class="relay-modal-actions">
           <button type="button" class="bm-btn connect-primary" data-relay-host-confirm data-control>
             Confirm
@@ -1056,9 +1273,13 @@ function renderRelayModals(): string {
         <h2 id="relay-share-needs-ble-title" class="relay-modal-title">Connection needed</h2>
         <p class="relay-modal-body">
           To share a session for remote operators, connect this device to the camera over Bluetooth first, then tap Share again.
+          Or share <strong>ATEM CCU</strong> over your LAN when the banks API server can reach the switcher.
         </p>
-        <div class="relay-modal-actions">
-          <button type="button" class="bm-btn connect-primary" data-relay-share-needs-ble-ok data-control>
+        <div class="relay-modal-actions relay-modal-actions--stack">
+          <button type="button" class="bm-btn connect-primary" data-relay-share-atem-setup data-control>
+            Share ATEM CCU…
+          </button>
+          <button type="button" class="bm-btn" data-relay-share-needs-ble-ok data-control>
             OK
           </button>
         </div>
@@ -1086,13 +1307,25 @@ function renderRelayModals(): string {
   `;
 }
 
-/** @param bleAvailable - `navigator.bluetooth` usable for pairing (Join over WebSocket may still work when false). */
-export function renderPanelTemplate(bleAvailable: boolean): string {
+// ─────────────────────────────────────────────────────────────────────────────
+// Root panel template + view chrome
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface PanelBleUiOptions {
+  /** Capacitor WebView: hide install-Bluefy / desktop-Chrome hints — BLE uses the native stack. */
+  hideBrowserBleInstallHints?: boolean;
+  /** Desktop/browser only: show ATEM mixer LAN quick-connect on Connect tab. */
+  showAtemLanConnect?: boolean;
+}
+
+/** @param bleUi - Optional Connect-tab extras (e.g. browser-only ATEM LAN block). */
+export function renderPanelTemplate(bleTransportAvailable: boolean, bleUi?: PanelBleUiOptions): string {
+  const hideHints = bleUi?.hideBrowserBleInstallHints ?? false;
   return `
     <main class="panel-app panel-app--views" data-view-active="connect">
-      ${renderAppHeader(bleAvailable)}
+      ${renderAppHeader(bleTransportAvailable)}
       <div class="views" data-views>
-        ${renderConnectView(bleAvailable)}
+        ${renderConnectView(bleTransportAvailable, bleUi)}
         ${renderSettingsView()}
         ${renderIrisView()}
         ${renderAudioView()}
@@ -1102,8 +1335,8 @@ export function renderPanelTemplate(bleAvailable: boolean): string {
       </div>
       ${renderSceneBar()}
       ${renderViewNav()}
-      ${!bleAvailable && isIosLikeWebBluetoothBlocked() ? renderBluefyOfferModal() : ""}
-      ${!bleAvailable && !isIosLikeWebBluetoothBlocked() ? renderGenericWebBleHelpModal() : ""}
+      ${!bleTransportAvailable && !hideHints && isIosLikeWebBluetoothBlocked() ? renderBluefyOfferModal() : ""}
+      ${!bleTransportAvailable && !hideHints && !isIosLikeWebBluetoothBlocked() ? renderGenericWebBleHelpModal() : ""}
       ${renderRelayModals()}
     </main>
   `;
@@ -1193,6 +1426,7 @@ export function updatePanel(
   updatePowerButton(root, snapshot.status?.powerOn ?? false);
   setReadout(root, "iris", formatIris(snapshot));
   setReadout(root, "focus", formatFocus(snapshot.lens.focus));
+  setReadout(root, "zoom", formatZoom(snapshot.lens.zoom, snapshot.lens.zoomMm));
   setReadout(root, "masterBlackReadout", formatMasterBlack(snapshot.color.lift.luma));
   setReadout(root, "wb", formatWhiteBalance(snapshot.whiteBalance));
   setReadout(root, "tint", formatTint(snapshot.whiteBalance?.tint));
@@ -1236,6 +1470,7 @@ export function updatePanel(
   updateIrisWheel(root, snapshot);
   updateIrisJoystick(root, snapshot);
   updateFocusFader(root, snapshot);
+  updateZoomFader(root, snapshot);
   updateUnitOutputs(root, snapshot);
   updateLeds(root, snapshot, transport);
   updateRecording(root, snapshot.recording);
@@ -1323,6 +1558,10 @@ function updateCameraBadge(root: HTMLElement, cameraNumber: number | undefined):
   digit.textContent = cameraNumber !== undefined ? String(cameraNumber) : "—";
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Fader / iris / paint numeric mapping helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
 export const MASTER_GAIN_RANGE = { min: -12, max: 30 };
 export const MASTER_BLACK_RANGE = { min: -2, max: 2 };
 
@@ -1362,8 +1601,16 @@ function updateFocusFader(root: HTMLElement, snapshot: CameraSnapshot): void {
   const handle = fader?.querySelector<HTMLElement>("[data-h-fader-handle]");
   if (!fader || !handle) return;
   if (fader.classList.contains("dragging")) return;
-  const value = snapshot.lens.focus;
-  if (value === undefined) return;
+  const value = snapshot.lens.focus ?? 0.5;
+  positionHFaderHandle(fader, handle, value);
+}
+
+function updateZoomFader(root: HTMLElement, snapshot: CameraSnapshot): void {
+  const fader = root.querySelector<HTMLElement>('[data-h-fader="zoom"]');
+  const handle = fader?.querySelector<HTMLElement>("[data-h-fader-handle]");
+  if (!fader || !handle) return;
+  if (fader.classList.contains("dragging")) return;
+  const value = snapshot.lens.zoom ?? 0.5;
   positionHFaderHandle(fader, handle, value);
 }
 
@@ -1392,11 +1639,13 @@ export function irisTbarDragRangePx(joystick: HTMLElement, handle: HTMLElement):
 export function positionIrisHandle(joystick: HTMLElement, handle: HTMLElement, irisNormalised: number): void {
   if (joystick.clientHeight === 0) return;
   const iris = Math.max(0, Math.min(1, irisNormalised));
+  /** bm-tbar `--pos` is 1 at shaft top; apertureNormalised is 0 wide open → 1 closed (matches F readout mapping). */
+  const pos = 1 - iris;
 
   joystick.style.setProperty("--travel", `${irisTbarDragRangePx(joystick, handle)}px`);
 
-  handle.style.setProperty("--pos", String(iris));
-  joystick.querySelector<HTMLElement>(".bm-tbar__ladder")?.style.setProperty("--fill", String(iris));
+  handle.style.setProperty("--pos", String(pos));
+  joystick.querySelector<HTMLElement>(".bm-tbar__ladder")?.style.setProperty("--fill", String(pos));
   handle.setAttribute("aria-valuenow", String(Math.round(iris * 100)));
 }
 
@@ -1691,6 +1940,16 @@ function formatFocus(focus: number | undefined): string {
   return `${(focus * 100).toFixed(0)}%`;
 }
 
+function formatZoom(zoomNormalised: number | undefined, zoomMm: number | undefined): string {
+  if (zoomNormalised !== undefined) {
+    return `${(zoomNormalised * 100).toFixed(0)}%`;
+  }
+  if (zoomMm !== undefined && Number.isFinite(zoomMm)) {
+    return `${Math.round(zoomMm)}mm`;
+  }
+  return "--";
+}
+
 function formatMasterBlack(luma: number): string {
   return `${luma >= 0 ? "+" : ""}${luma.toFixed(2)}`;
 }
@@ -1737,10 +1996,20 @@ export function positionMiniFaderHandle(fader: HTMLElement, handle: HTMLElement,
 export function positionHFaderHandle(fader: HTMLElement, handle: HTMLElement, value: number): void {
   const rect = fader.getBoundingClientRect();
   if (rect.width === 0) return;
-  const horizontalRange = rect.width - handle.offsetWidth;
+  const horizontalRange = Math.max(1, rect.width - handle.offsetWidth);
   const v = Math.max(0, Math.min(1, value));
   const x = v * horizontalRange;
   handle.style.left = `${x}px`;
+}
+
+/** Thumb centre at `clientX` → normalised 0–1 (aligns drag start with pointer / visual thumb). */
+export function hfaderValueFromClientX(fader: HTMLElement, handle: HTMLElement, clientX: number): number {
+  const rect = fader.getBoundingClientRect();
+  if (rect.width === 0) return 0;
+  const horizontalRange = Math.max(1, rect.width - handle.offsetWidth);
+  const x = clientX - rect.left;
+  const v = (x - handle.offsetWidth / 2) / horizontalRange;
+  return Math.max(0, Math.min(1, v));
 }
 
 function updateAudioCard(root: HTMLElement, snapshot: CameraSnapshot): void {
@@ -1804,6 +2073,18 @@ function updateVideoCard(root: HTMLElement, snapshot: CameraSnapshot): void {
   setMiniFaderMirror(root, "tally-master", "tallyMaster", snapshot.tally?.brightness?.master);
   setMiniFaderMirror(root, "tally-front", "tallyFront", snapshot.tally?.brightness?.front);
   setMiniFaderMirror(root, "tally-rear", "tallyRear", snapshot.tally?.brightness?.rear);
+
+  const frameRateSelect = root.querySelector<HTMLSelectElement>("[data-video-frame-rate]");
+  if (frameRateSelect && snapshot.recordingFormat?.frameRate !== undefined && document.activeElement !== frameRateSelect) {
+    const v = String(Math.round(snapshot.recordingFormat.frameRate));
+    if ([...frameRateSelect.options].some((o) => o.value === v)) {
+      frameRateSelect.value = v;
+    }
+  }
+  const offSpeedInput = root.querySelector<HTMLInputElement>("[data-video-off-speed-rate]");
+  if (offSpeedInput && snapshot.offSpeedFrameRate !== undefined && document.activeElement !== offSpeedInput) {
+    offSpeedInput.value = String(snapshot.offSpeedFrameRate);
+  }
 }
 
 function setSegmentedValue(root: HTMLElement, selector: string, value: number | undefined): void {

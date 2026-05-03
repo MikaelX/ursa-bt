@@ -1,13 +1,16 @@
-/**
- * Relay hub: multiplex host (BLE proxy in browser) and join-only WebSocket clients.
- * Optional Redis pub/sub lets replicas share sessions across swarm nodes.
- */
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, Server as HttpServer } from "node:http";
 import type { Duplex } from "node:stream";
 import { URL } from "node:url";
 import type { WebSocket as WsType } from "ws";
 import { WebSocketServer } from "ws";
+import { AtemCcuRoomBridge } from "../atem/atemCcuRoomBridge.js";
+
+/**
+ * @file coordinator.ts (`server/relay`)
+ *
+ * bm-bluetooth — WebSocket multiplexing between BLE-host browsers and relay join clients; optional Redis bridges replicas.
+ */
 
 const RELAY_PATH = "/api/relay/socket";
 
@@ -16,7 +19,13 @@ const REDIS_TTL_SEC = 120;
 
 /** JSON sent over WebSocket (host <-> server <-> joiners). */
 export type RelayWireMessage =
-  | { type: "host_register"; sessionName: string; deviceId: string }
+  | {
+      type: "host_register";
+      sessionName: string;
+      deviceId: string;
+      /** Server opens ATEM TCP and serves CCU as relay transport (no BLE on host). */
+      atemCcu?: { address: string; port?: number; cameraId: number; inputs?: number };
+    }
   | { type: "join"; sessionId: string }
   | { type: "host_stop" }
   | { type: "host_ping" }
@@ -32,7 +41,10 @@ export type RelayWireMessage =
   | { type: "shared_session_dirty" }
   | { type: "request_bootstrap" }
   | { type: "bootstrap_snapshot"; snapshot: Record<string, unknown> }
-  | { type: "panel_sync"; snapshot: Record<string, unknown> };
+  | { type: "panel_sync"; snapshot: Record<string, unknown> }
+  | { type: "atem_ccu_ready"; address?: string; cameraId?: number }
+  | { type: "atem_ccu_link"; connected: boolean; address?: string; cameraId?: number }
+  | { type: "atem_ccu_error"; message: string };
 
 type Room = {
   sessionId: string;
@@ -41,6 +53,7 @@ type Room = {
   host?: WsType;
   clients: Set<WsType>;
   hostPingInterval?: ReturnType<typeof setInterval>;
+  atemBridge?: AtemCcuRoomBridge;
 };
 
 type RedisPair = {
@@ -67,12 +80,17 @@ export class RelayCoordinator {
   private readonly wss: WebSocketServer;
   private readonly redisUrl: string | undefined;
   private redis?: RedisPair;
+  /** When set, `ensureRedis` skips new attempts until the clock passes this (retry after transient failure / boot race). */
+  private redisRetryNotBeforeMs = 0;
 
   constructor(redisUrl?: string) {
     this.redisUrl = redisUrl?.trim() || undefined;
     this.wss = new WebSocketServer({ noServer: true });
     this.wss.on("connection", (socket: WsType, req: IncomingMessage) => {
-      void this.ensureRedis().then(() => this.handleSocket(socket, req));
+      void (async () => {
+        await this.waitForRedisIfConfigured(15_000);
+        this.handleSocket(socket, req);
+      })();
     });
   }
 
@@ -87,20 +105,35 @@ export class RelayCoordinator {
   }
 
   /** Public session list for Join modal. */
-  async listSessions(): Promise<{ id: string; name: string; deviceId: string }[]> {
+  async listSessions(): Promise<
+    { id: string; name: string; deviceId: string; atemCcuTcp?: boolean }[]
+  > {
     await this.ensureRedis();
     if (!this.redis) {
       return [...this.rooms.values()]
         .filter((r) => !!r.host)
-        .map((r) => ({ id: r.sessionId, name: r.sessionName, deviceId: r.deviceId }));
+        .map((r) => ({
+          id: r.sessionId,
+          name: r.sessionName,
+          deviceId: r.deviceId,
+          atemCcuTcp: r.atemBridge ? r.atemBridge.isTcpLinked : undefined,
+        }));
     }
     const keys = await this.redis.pub.keys(`${REDIS_PREFIX_SESSION}*`);
-    const out: { id: string; name: string; deviceId: string }[] = [];
+    const out: { id: string; name: string; deviceId: string; atemCcuTcp?: boolean }[] = [];
     for (const key of keys) {
       const sid = key.slice(REDIS_PREFIX_SESSION.length);
       const h = await this.redis.pub.hgetall(key);
       if (!h.name || h.hasHost !== "1") continue;
-      out.push({ id: sid, name: h.name, deviceId: h.deviceId ?? "" });
+      let atemCcuTcp: boolean | undefined;
+      if (h.atemTcp === "1") atemCcuTcp = true;
+      else if (h.atemTcp === "0") atemCcuTcp = false;
+      out.push({
+        id: sid,
+        name: h.name,
+        deviceId: h.deviceId ?? "",
+        atemCcuTcp,
+      });
     }
     return out.sort((a, b) => a.name.localeCompare(b.name));
   }
@@ -110,22 +143,40 @@ export class RelayCoordinator {
     await new Promise<void>((resolve) => this.wss.close(() => resolve()));
   }
 
+  /** When `REDIS_URL` is set, give Redis time to accept connections (swarm boot / transient DNS) before handling relay WS. */
+  private async waitForRedisIfConfigured(maxMs: number): Promise<void> {
+    if (!this.redisUrl || this.redis) return;
+    const deadline = Date.now() + maxMs;
+    while (!this.redis && Date.now() < deadline) {
+      await this.ensureRedis();
+      if (this.redis) return;
+      const waitMs = Math.max(80, Math.min(750, this.redisRetryNotBeforeMs - Date.now()));
+      await new Promise<void>((r) => setTimeout(r, waitMs));
+    }
+  }
+
   private async ensureRedis(): Promise<void> {
     if (!this.redisUrl || this.redis) return;
+    const now = Date.now();
+    if (now < this.redisRetryNotBeforeMs) return;
+    let pub: import("ioredis").default | undefined;
+    let sub: import("ioredis").default | undefined;
     try {
       const Redis = (await import("ioredis")).default;
-      const pub = new Redis(this.redisUrl);
-      const sub = new Redis(this.redisUrl);
+      pub = new Redis(this.redisUrl);
+      sub = new Redis(this.redisUrl);
       await new Promise<void>((resolve, reject) => {
         let left = 2;
+        const to = setTimeout(() => reject(new Error("Redis connect timeout")), 12_000);
         const done = (): void => {
           left -= 1;
-          if (left === 0) resolve();
+          if (left === 0) {
+            clearTimeout(to);
+            resolve();
+          }
         };
         pub.once("ready", done);
         sub.once("ready", done);
-        pub.once("error", reject);
-        sub.once("error", reject);
       });
       await sub.psubscribe("bmrelay:in:*");
       await sub.psubscribe("bmrelay:out:*");
@@ -137,10 +188,23 @@ export class RelayCoordinator {
         else if (dir === "out") this.deliverToLocalJoiners(sessionId, msg);
       });
       this.redis = { pub, sub };
+      this.redisRetryNotBeforeMs = 0;
       console.log("[relay] Redis pub/sub enabled");
     } catch (e) {
-      console.warn("[relay] Redis disabled:", (e as Error).message);
+      try {
+        sub?.disconnect();
+      } catch {
+        /* ignore */
+      }
+      try {
+        pub?.disconnect();
+      } catch {
+        /* ignore */
+      }
+      console.warn("[relay] Redis connection failed (will retry):", (e as Error).message);
       this.redis = undefined;
+      // Swarm / boot race: app replica may start before Redis accepts connections; do not stay "Redis-less" forever.
+      this.redisRetryNotBeforeMs = Date.now() + 4000;
     }
   }
 
@@ -174,6 +238,10 @@ export class RelayCoordinator {
       if (!roomId || role !== "host") return;
       const room = this.rooms.get(roomId);
       if (room?.host === ws) {
+        if (room.atemBridge) {
+          room.atemBridge.dispose();
+          room.atemBridge = undefined;
+        }
         if (room.hostPingInterval) clearInterval(room.hostPingInterval);
         room.host = undefined;
         void this.refreshRedisMeta(room).catch(() => {});
@@ -226,6 +294,54 @@ export class RelayCoordinator {
           }, 20000);
           void this.refreshRedisMeta(room);
           ws.send(JSON.stringify({ type: "hosted", sessionId } satisfies RelayWireMessage));
+
+          const acRaw = (parsed as { atemCcu?: unknown }).atemCcu;
+          if (acRaw && typeof acRaw === "object" && acRaw !== null) {
+            const ac = acRaw as {
+              address?: unknown;
+              port?: unknown;
+              cameraId?: unknown;
+              inputs?: unknown;
+            };
+            const address = String(ac.address ?? "").trim();
+            const cameraId = Math.round(Number(ac.cameraId));
+            const port =
+              ac.port !== undefined && ac.port !== null ? Math.round(Number(ac.port)) : undefined;
+            const inputs =
+              ac.inputs !== undefined && ac.inputs !== null
+                ? Math.round(Number(ac.inputs))
+                : undefined;
+            if (!address || !Number.isFinite(cameraId) || cameraId < 1 || cameraId > 24) {
+              ws.send(JSON.stringify({ type: "atem_ccu_error", message: "Invalid atemCcu address or cameraId" }));
+              break;
+            }
+            const tcpPort = port !== undefined && Number.isFinite(port) && port > 0 ? port : 9910;
+            const inputSlots = Math.min(32, Math.max(4, inputs ?? 16));
+            const bridge = new AtemCcuRoomBridge(cameraId, inputSlots, {
+              emitPanelSync: (snapshot) => this.emitPanelSyncFromAtem(sessionId, snapshot),
+              hostSocket: () => room.host,
+              onAtemTcpLinkChange: (linked) => {
+                const h = room.host;
+                if (h?.readyState === 1) {
+                  try {
+                    h.send(
+                      JSON.stringify({
+                        type: "atem_ccu_link",
+                        connected: linked,
+                        address: linked ? address : undefined,
+                        cameraId: linked ? cameraId : undefined,
+                      } satisfies RelayWireMessage),
+                    );
+                  } catch {
+                    /* ignore */
+                  }
+                }
+                void this.refreshRedisMeta(room);
+              },
+            });
+            room.atemBridge = bridge;
+            void bridge.connect(address, tcpPort);
+          }
           break;
         }
 
@@ -253,6 +369,9 @@ export class RelayCoordinator {
             }
           }
           if (!hasHost) {
+            console.warn(
+              `[relay] join rejected: no active host for session ${sessionId} (redis: ${this.redis ? "ok" : this.redisUrl ? "down/disabled" : "off"})`,
+            );
             ws.send(JSON.stringify({ type: "session_ended" } satisfies RelayWireMessage));
             ws.close(4004, "session unavailable");
             return;
@@ -291,13 +410,34 @@ export class RelayCoordinator {
           break;
         }
 
-        case "forward_cmd":
+        case "forward_cmd": {
+          const id = this.findSessionForSocket(ws);
+          if (!id) return;
+          const room = this.rooms.get(id);
+          const hex =
+            typeof (parsed as { hex?: unknown }).hex === "string"
+              ? ((parsed as { hex: string }).hex as string)
+              : "";
+          if (room?.atemBridge && hex.trim()) {
+            void room.atemBridge.handleForwardCmdHex(hex).catch((err: unknown) => {
+              console.warn("[relay] ATEM forward_cmd failed:", err);
+            });
+            return;
+          }
+          if (room?.host === ws) return;
+          this.routeToHost(id, raw);
+          break;
+        }
+
         case "host_power":
         case "host_pair":
         case "shared_session_dirty": {
           const id = this.findSessionForSocket(ws);
           if (!id) return;
           const room = this.rooms.get(id);
+          if (room?.atemBridge && parsed.type !== "shared_session_dirty") {
+            return;
+          }
           if (room?.host === ws) return;
           this.routeToHost(id, raw);
           break;
@@ -341,9 +481,28 @@ export class RelayCoordinator {
     return undefined;
   }
 
+  /** Push ATEM-derived CCU state to the hosting browser and all joiners. */
+  emitPanelSyncFromAtem(sessionId: string, snapshot: Record<string, unknown>): void {
+    const line = JSON.stringify({ type: "panel_sync", snapshot } satisfies RelayWireMessage);
+    const room = this.rooms.get(sessionId);
+    const h = room?.host;
+    if (h && h.readyState === 1) {
+      try {
+        h.send(line);
+      } catch {
+        /* ignore */
+      }
+    }
+    this.routeToJoiners(sessionId, line);
+  }
+
   private closeRoomAsHost(sessionId: string): void {
     const room = this.rooms.get(sessionId);
     if (!room) return;
+    if (room.atemBridge) {
+      room.atemBridge.dispose();
+      room.atemBridge = undefined;
+    }
     if (room.hostPingInterval) clearInterval(room.hostPingInterval);
     if (room.host) {
       try {
@@ -429,11 +588,14 @@ export class RelayCoordinator {
     if (!this.redis) return;
     const key = `${REDIS_PREFIX_SESSION}${room.sessionId}`;
     const hasHost = room.host && room.host.readyState === 1 ? "1" : "0";
-    await this.redis.pub
-      .multi()
-      .hset(key, "name", room.sessionName, "deviceId", room.deviceId, "hasHost", hasHost)
-      .expire(key, REDIS_TTL_SEC)
-      .exec();
+    const multi = this.redis.pub.multi();
+    multi.hset(key, "name", room.sessionName, "deviceId", room.deviceId, "hasHost", hasHost);
+    if (room.atemBridge !== undefined) {
+      multi.hset(key, "atemTcp", room.atemBridge.isTcpLinked ? "1" : "0");
+    } else {
+      multi.hdel(key, "atemTcp");
+    }
+    await multi.expire(key, REDIS_TTL_SEC).exec();
   }
 
   private async deleteRedisMeta(sessionId: string): Promise<void> {

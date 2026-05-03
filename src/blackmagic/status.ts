@@ -1,3 +1,13 @@
+/**
+ * @file status.ts
+ *
+ * bm-bluetooth — Decode and normalize the BLE **Camera Status** characteristic (byte 0 bit flags plus
+ * auxiliary payload bytes preserved for telemetry / logs). Companion to `CAMERA_STATUS_CHARACTERISTIC` in `./constants`.
+ *
+ * This repository is **private**; no SPDX license identifier is declared in `package.json`.
+ */
+
+/** Documented readiness / link flags in Camera Status notification byte 0 (low bits). */
 export const enum CameraStatusFlag {
   PowerOn = 0x01,
   Connected = 0x02,
@@ -25,6 +35,22 @@ export interface CameraStatus {
   trailingPayloadHex?: string;
   /** Byte 0 bits outside {@link CAMERA_STATUS_KNOWN_FLAG_BITS} (e.g. 0x40 / 0x80); meaning is camera/firmware-specific. */
   statusByteReservedBits: number;
+}
+
+/** Shown in the status list when the local BLE GATT link is gone (until live notifications resume). */
+export function disconnectedPlaceholderStatus(): CameraStatus {
+  return {
+    raw: 0,
+    powerOn: false,
+    connected: false,
+    paired: false,
+    versionsVerified: false,
+    initialPayloadReceived: false,
+    cameraReady: false,
+    labels: ["Not connected"],
+    payloadHex: "",
+    statusByteReservedBits: 0,
+  };
 }
 
 const STATUS_LABELS: Array<[CameraStatusFlag, string]> = [

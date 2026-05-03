@@ -1,8 +1,22 @@
-import type { Bank, BanksFile, GlobalScenesFile } from "./bank";
+import type { Bank, BanksFile, GlobalScenesFile, AtemCcuRelayStored } from "./bank";
 import { emptyBanksFile, emptyGlobalScenesFile } from "./bank";
+
+/**
+ * @file banksClient.ts
+ *
+ * bm-bluetooth — Thin HTTP façade over `server/index` routes (`/api/cameras/:id/banks`, `/api/global/scenes`, …).
+ * Browser uses {@link HttpBanksApi}; tests use {@link NullBanksApi}.
+ *
+ * **Private** repo.
+ */
 
 export type SaveGlobalSceneResponse = { camera: BanksFile; globalBanks: Array<Bank | null> };
 
+/**
+ * Persisted scenes + last-loaded slot metadata keyed by deterministic camera id strings.
+ *
+ * Implemented by {@link HttpBanksApi}; {@link NullBanksApi} is a no-fetch stub for SSR-less environments.
+ */
 export interface BanksApi {
   load(deviceId: string): Promise<BanksFile>;
   loadGlobalScenes(): Promise<GlobalScenesFile>;
@@ -13,8 +27,11 @@ export interface BanksApi {
     update: { slot?: number | null; globalLoadedSlot?: number | null },
   ): Promise<BanksFile>;
   saveLastState(deviceId: string, state: Bank): Promise<void>;
+  /** Persist ATEM switcher address / CCU camera index for `atem-ccu-host`. */
+  saveAtemCcuRelay(deviceId: string, relay: AtemCcuRelayStored): Promise<void>;
 }
 
+/** Default browser implementation posting JSON to **`/api`**. */
 export class HttpBanksApi implements BanksApi {
   constructor(private readonly baseUrl = "/api") {}
 
@@ -85,6 +102,15 @@ export class HttpBanksApi implements BanksApi {
     );
     if (!res.ok) throw new Error(`Last-state save failed: HTTP ${res.status}`);
   }
+
+  async saveAtemCcuRelay(deviceId: string, relay: AtemCcuRelayStored): Promise<void> {
+    const res = await fetch(`${this.baseUrl}/cameras/${encodeURIComponent(deviceId)}/atem-ccu-relay`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(relay),
+    });
+    if (!res.ok) throw new Error(`ATEM relay save failed: HTTP ${res.status}`);
+  }
 }
 
 export class NullBanksApi implements BanksApi {
@@ -104,6 +130,9 @@ export class NullBanksApi implements BanksApi {
     return emptyBanksFile();
   }
   async saveLastState(): Promise<void> {
+    return undefined;
+  }
+  async saveAtemCcuRelay(): Promise<void> {
     return undefined;
   }
 }
