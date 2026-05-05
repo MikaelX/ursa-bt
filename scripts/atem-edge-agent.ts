@@ -9,6 +9,9 @@
  *
  * Legacy session edge (`atem_edge_register`) still works with SESSION_ID + EDGE_TOKEN if CONNECTOR_NAME is unset.
  *
+ * Verbose stderr (`[atem-edge] …`): `ATEM_EDGE_VERBOSE=1` or `true` — logs relay downlink types, connect targets,
+ * and forward_cmd hex (truncated).
+ *
  * @private
  */
 
@@ -68,6 +71,16 @@ function inputSlots(ac: AtemCcu): number {
     return Math.min(32, Math.max(4, Math.round(ac.inputs)));
   }
   return 16;
+}
+
+function edgeVerbose(): boolean {
+  const v = process.env.ATEM_EDGE_VERBOSE ?? "";
+  return v === "1" || v.toLowerCase() === "true";
+}
+
+function edgeLog(...args: unknown[]): void {
+  if (!edgeVerbose()) return;
+  console.error("[atem-edge]", ...args);
 }
 
 function main(): void {
@@ -137,6 +150,7 @@ function main(): void {
   };
 
   sock.addEventListener("open", () => {
+    edgeLog("websocket open → register");
     if (cli.mode === "connector") {
       const reg: Record<string, unknown> = {
         type: "atem_connector_register",
@@ -147,9 +161,11 @@ function main(): void {
         reg.token = cli.token;
       }
       sock.send(JSON.stringify(reg));
+      edgeLog("sent atem_connector_register", { name: cli.name, reconnect: Boolean(cli.connectorId) });
       return;
     }
     sock.send(JSON.stringify({ type: "atem_edge_register", sessionId: cli.sessionId, token: cli.token }));
+    edgeLog("sent atem_edge_register", { sessionPrefix: cli.sessionId.slice(0, 8) });
   });
 
   sock.addEventListener("message", (ev) => {
@@ -168,8 +184,16 @@ function main(): void {
       return;
     }
     const t = p.type;
+    edgeLog("inbound", { type: t ?? "(parse ok, no type)" });
 
-    if (t === "atem_edge_forward_cmd" && typeof p.hex === "string" && bridge) {
+    if (t === "atem_edge_forward_cmd" && typeof p.hex === "string") {
+      const hex = p.hex.replace(/\s+/g, "");
+      const preview = hex.length > 96 ? `${hex.slice(0, 96)}…` : hex;
+      if (!bridge) {
+        edgeLog("forward_cmd ignored (no ATEM bridge yet)", { hexLen: hex.length, preview });
+        return;
+      }
+      edgeLog("forward_cmd → bridge", { hexLen: hex.length, preview });
       void bridge.handleForwardCmdHex(p.hex).catch((err: unknown) => {
         console.error("[atem-edge] forward_cmd", err);
       });
@@ -181,6 +205,7 @@ function main(): void {
       console.error(
         `[atem-edge] connector registered id=${p.connectorId} token=${p.token ?? "?"} name=${p.name ?? "?"}`,
       );
+      edgeLog("connector ready (uplink id set)", { connectorId: p.connectorId });
       return;
     }
 
@@ -193,22 +218,29 @@ function main(): void {
       const cmd = p.command;
       if (cmd === "connect" && p.atemCcu?.address && Number.isFinite(Number(p.atemCcu.cameraId))) {
         lastAtem = p.atemCcu;
-        bridge?.dispose();
-        bridge = undefined;
-        bridge = createBridge(p.atemCcu);
         const tcpPort =
           p.atemCcu.port !== undefined && Number.isFinite(p.atemCcu.port) && p.atemCcu.port > 0
             ? Math.round(p.atemCcu.port)
             : 9910;
+        edgeLog("atem_edge_control connect", {
+          address: p.atemCcu.address.trim(),
+          port: tcpPort,
+          cameraId: p.atemCcu.cameraId,
+        });
+        bridge?.dispose();
+        bridge = undefined;
+        bridge = createBridge(p.atemCcu);
         void bridge.connect(p.atemCcu.address.trim(), tcpPort);
         return;
       }
       if (cmd === "disconnect") {
+        edgeLog("atem_edge_control disconnect");
         bridge?.dispose();
         bridge = undefined;
         return;
       }
       if (cmd === "restart" && lastAtem) {
+        edgeLog("atem_edge_control restart");
         bridge?.dispose();
         bridge = undefined;
         bridge = createBridge(lastAtem);
