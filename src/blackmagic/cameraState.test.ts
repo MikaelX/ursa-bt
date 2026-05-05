@@ -304,6 +304,13 @@ describe("CameraState", () => {
     expect(state.current.metadata.cameraId).toBe("Cam A");
   });
 
+  it("ingests Recording format / Storage media (cat 9 param 6) tail int8 as body camera number", () => {
+    const state = new CameraState();
+    state.ingestIncomingPacket(new Uint8Array([0xff, 0x06, 0x00, 0x00, 0x09, 0x06, 0x01, 0x02, 0x00, 0x06]));
+    expect(state.current.cameraNumber).toBe(6);
+    expect(state.current.metadata.cameraId).toBe("6");
+  });
+
   it("ingests tally brightness echoes per sub-parameter", () => {
     const state = new CameraState();
     state.ingestIncomingPacket(commands.tallyBrightness(1));
@@ -323,6 +330,30 @@ describe("CameraState", () => {
     state.setCameraNumber(3);
     expect(state.current.cameraNumber).toBe(3);
     expect(listener).toHaveBeenLastCalledWith(expect.objectContaining({ cameraNumber: 3 }));
+  });
+
+  it("relay merge does not use ATEM switcher deviceName as the camera product", () => {
+    const state = new CameraState();
+    state.setDeviceName("URSA Broadcast");
+    state.relayPanelSyncPatch({ deviceName: "ATEM Television Studio HD8 ISO" });
+    expect(state.current.deviceName).toBe("URSA Broadcast");
+  });
+
+  it("relay bootstrap does not hydrate ATEM switcher name into deviceName", () => {
+    const state = new CameraState();
+    state.hydrateFromRelayExport({
+      deviceName: "ATEM Mini Extreme ISO",
+      gainDb: 3,
+    });
+    expect(state.current.deviceName).toBeUndefined();
+    expect(state.current.gainDb).toBe(3);
+  });
+
+  it("setDeviceName ignores ATEM switcher names and keeps the previous camera name", () => {
+    const state = new CameraState();
+    state.setDeviceName("URSA Broadcast");
+    state.setDeviceName("ATEM Constellation 8K");
+    expect(state.current.deviceName).toBe("URSA Broadcast");
   });
 
   it("hydrates relay bootstrap snapshot (nested colour + tally)", () => {

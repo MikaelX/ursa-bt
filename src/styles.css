@@ -130,6 +130,30 @@ label {
   width: min(100%, 760px);
   margin: 0 auto;
   padding: 1rem;
+  position: relative;
+}
+
+/* Floating 4px tally ring (fixed inset); program > preview > off. `syncViewportTallyBorder` in panel.ts. */
+.panel-app::before {
+  content: "";
+  position: fixed;
+  inset: 8px;
+  border: 4px solid transparent;
+  border-radius: 16px;
+  pointer-events: none;
+  z-index: 50;
+  opacity: 0;
+  transition: opacity 160ms ease, border-color 160ms ease;
+}
+
+.panel-app.viewport-tally--preview::before {
+  border-color: #2c8c4c;
+  opacity: 1;
+}
+
+.panel-app.viewport-tally--program::before {
+  border-color: #c1322c;
+  opacity: 1;
 }
 
 .eyebrow {
@@ -1774,29 +1798,81 @@ button.bluefy-modal-dismiss {
   gap: 0.6rem;
 }
 
-.debug-atem-sync-toggle {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.45rem;
-  font-size: 0.78rem;
-  color: #c4cad2;
-  margin: 0 0 0.35rem;
-  cursor: pointer;
+.debug-settings-card {
+  min-width: 0;
 }
 
-.debug-atem-sync-toggle input {
-  margin-top: 0.15rem;
+.debug-settings-card .card-header {
+  margin-bottom: 0.35rem;
+}
+
+.debug-settings-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.debug-settings-row {
+  margin: 0;
+  padding: 0.35rem 0 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.debug-settings-row:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+
+.debug-settings-label {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  gap: 0.45rem;
+  min-width: 0;
+  cursor: pointer;
+  font-size: 0.78rem;
+  color: #c4cad2;
+}
+
+.debug-settings-label input {
+  margin-top: 0.2rem;
   accent-color: #2faa4d;
 }
 
-.debug-atem-sync-toggle code {
+.debug-settings-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.debug-settings-name {
+  font-weight: 600;
+  color: #e8ecf0;
+}
+
+.debug-settings-desc {
+  font-size: 0.68rem;
+  line-height: 1.3;
+}
+
+.debug-settings-desc code {
   font-size: 0.85em;
 }
 
-.debug-atem-sync-hint {
-  margin: 0 0 0.65rem;
-  font-size: 0.68rem;
+.debug-settings-note {
+  display: block;
+  margin-top: 0.22rem;
+  font-size: 0.65rem;
   line-height: 1.35;
+}
+
+.debug-settings-note code {
+  font-size: 0.85em;
 }
 
 .debug-log {
@@ -1817,6 +1893,8 @@ button.bluefy-modal-dismiss {
 .debug-log li {
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
   padding-bottom: 0.2rem;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 /* Iris mobile/tablet sizing lives in the dedicated iris view block further
@@ -2620,9 +2698,10 @@ button.bluefy-modal-dismiss {
     overscroll-behavior-y: contain;
   }
 
-  /* Exposure + Video: fit within bounded desktop shell — no `.views` scroll */
+  /* Exposure + Video + Debug: fit within bounded desktop shell — no `.views` scroll */
   .panel-app--views .views:has(#view-settings:not([hidden])),
-  .panel-app--views .views:has(#view-video:not([hidden])) {
+  .panel-app--views .views:has(#view-video:not([hidden])),
+  .panel-app--views .views:has(#view-debug:not([hidden])) {
     overflow-x: hidden;
     overflow-y: hidden;
   }
@@ -2637,6 +2716,37 @@ button.bluefy-modal-dismiss {
     flex: 1 1 auto;
     min-height: 0;
     overflow: hidden;
+  }
+
+  .panel-app--views .views > .view--debug:not([hidden]) {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+  }
+
+  .view--debug > .status-card,
+  .view--debug > .debug-settings-card {
+    flex-shrink: 0;
+  }
+
+  .view--debug > .debug-log-card {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .view--debug > .debug-log-card .log-header {
+    flex-shrink: 0;
+  }
+
+  .view--debug > .debug-log-card .debug-log {
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: none;
   }
 
   .view--settings .settings-chassis {

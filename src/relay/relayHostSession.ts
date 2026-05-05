@@ -1,6 +1,10 @@
 import type { CameraStatus } from "../blackmagic/status";
 import type { CameraClient } from "../ui/cameraClientTypes";
 import { getRelaySocketUrl } from "./relayUrl";
+import { nullBleCameraClient } from "./nullBleCameraClient";
+
+/** Same as `ATEM_CCU_TRACE_SNAPSHOT_KEY` in `server/atem/ccuWatchStyleTrace.ts` / relay `panel_sync` sidecar. */
+const RELAY_ATEM_CCU_TRACE_KEY = "__atemCcuTrace";
 
 /**
  * @file relayHostSession.ts
@@ -29,6 +33,8 @@ type WireOut =
       deviceId: string;
       atemCcu?: AtemCcuRelayRegister;
     }
+  | { type: "host_atem_ccu_register"; atemCcu: AtemCcuRelayRegister }
+  | { type: "host_atem_ccu_stop" }
   | { type: "host_stop" }
   | { type: "host_ping" }
   | { type: "panel_sync"; snapshot: Record<string, unknown> };
@@ -56,6 +62,8 @@ export class RelayHostSession {
   sessionId: string | undefined;
   private pingTimer: ReturnType<typeof setInterval> | undefined;
   private atemCcuConfig: AtemCcuRelayRegister | undefined;
+  /** Throttle log when an inbound `panel_sync` is dropped by the ATEM gate. */
+  private panelSyncGateDropLogAt = 0;
 
   constructor(
     private readonly ble: CameraClient,
@@ -87,6 +95,32 @@ export class RelayHostSession {
   /** Host session where CCU is owned by the relay server (ATEM TCP). */
   get isAtemCcuHost(): boolean {
     return !!this.atemCcuConfig && this.isActive;
+  }
+
+  /** ATEM-only relay host (no local GATT); joiner `forward_cmd` is handled only on the hub. */
+  get exclusiveAtemRelayHost(): boolean {
+    return this.ble === nullBleCameraClient;
+  }
+
+  /** Add or replace the hub ATEM bridge on the **current** hosted session (same `sessionId` as BLE share). */
+  attachAtemCcu(atem: AtemCcuRelayRegister): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.sessionId) {
+      throw new Error("Relay host socket is not ready");
+    }
+    this.atemCcuConfig = atem;
+    this.ws.send(JSON.stringify({ type: "host_atem_ccu_register", atemCcu: atem } satisfies WireOut));
+  }
+
+  /** Tear down hub ATEM bridge only; BLE relay session stays up. */
+  detachAtemCcu(): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    try {
+      this.ws.send(JSON.stringify({ type: "host_atem_ccu_stop" } satisfies WireOut));
+    } catch {
+      /* ignore */
+    }
+    this.atemCcuConfig = undefined;
+    this._atemSwitcherTcpConnected = false;
   }
 
   /** Server reports ATEM switcher TCP connected (Camera Control may still be warming). */
@@ -278,17 +312,50 @@ export class RelayHostSession {
       return;
     }
 
+    if (t === "atem_ccu_log") {
+      const msg = (parsed as { message?: string }).message ?? "";
+      if (msg) this.params.log(msg);
+      return;
+    }
+
     if (t === "atem_ccu_error") {
       const msg = (parsed as { message?: string }).message ?? "ATEM CCU error";
       this.params.log(`ATEM CCU: ${msg}`);
       return;
     }
 
-    if (t === "panel_sync" && this.atemCcuConfig) {
+    if (t === "panel_sync") {
       const snap = (parsed as { snapshot?: Record<string, unknown> }).snapshot;
-      if (snap && typeof snap === "object") {
-        this.params.onServerPanelSync?.(snap);
+      if (!snap || typeof snap !== "object") return;
+      const dn = (snap as { deviceName?: unknown }).deviceName;
+      const deviceLooksAtem = typeof dn === "string" && dn.includes("ATEM CCU");
+      const traceRaw = (snap as Record<string, unknown>)[RELAY_ATEM_CCU_TRACE_KEY];
+      const hasAtemTrace =
+        RELAY_ATEM_CCU_TRACE_KEY in snap && traceRaw !== null && typeof traceRaw === "object";
+      const tallyRaw = (snap as { tally?: unknown }).tally;
+      const hasMixerTallyKeys =
+        tallyRaw !== null &&
+        typeof tallyRaw === "object" &&
+        !Array.isArray(tallyRaw) &&
+        ("programMe" in (tallyRaw as object) || "previewMe" in (tallyRaw as object));
+      const hasMixerGain = typeof (snap as { gainDb?: unknown }).gainDb === "number";
+      const hasMixerIso = typeof (snap as { iso?: unknown }).iso === "number";
+      const looksLikeAtemMixerSnap = deviceLooksAtem || hasMixerTallyKeys || hasMixerGain || hasMixerIso;
+      // Do not require `atemCcuConfig` alone: `detachAtemCcu` clears it before the hub stops, and
+      // `panel_sync` can still arrive briefly; hub payloads carry trace and/or mixer-shaped fields.
+      if (!this.atemCcuConfig && !hasAtemTrace && !looksLikeAtemMixerSnap) {
+        const now = Date.now();
+        if (now - this.panelSyncGateDropLogAt > 6000) {
+          this.panelSyncGateDropLogAt = now;
+          this.params.log(
+            `Relay host: ignored panel_sync (no ATEM mixer markers). deviceName=${String(dn)} keys=${Object.keys(snap)
+              .slice(0, 14)
+              .join(",")}`,
+          );
+        }
+        return;
       }
+      this.params.onServerPanelSync?.(snap as Record<string, unknown>);
       return;
     }
 
@@ -299,7 +366,7 @@ export class RelayHostSession {
 
     try {
       if (t === "forward_cmd") {
-        if (this.isAtemCcuHost) return;
+        if (this.isAtemCcuHost && this.exclusiveAtemRelayHost) return;
         const hex = (parsed as { hex?: string }).hex;
         if (typeof hex === "string") {
           const bytes = hexToBytes(hex);

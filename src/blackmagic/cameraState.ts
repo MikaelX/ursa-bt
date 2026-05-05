@@ -22,6 +22,15 @@ function snapshotDeviceIsUrsaForBleNd(name: string | undefined): boolean {
   return name.toUpperCase().includes("URSA");
 }
 
+/**
+ * BLE friendly name or relay snapshot `deviceName` from an ATEM switcher / CCU path — not a Blackmagic camera body.
+ * Used so the app header never shows a mixer as the paired camera product.
+ */
+export function deviceNameLooksLikeAtemSwitcher(raw: string | undefined): boolean {
+  if (!raw?.trim()) return false;
+  return /\bATEM\b/i.test(raw);
+}
+
 function isRelayPanelSyncDecoded(packet: DecodedConfigurationPacket): boolean {
   if (packet.category === 4 && (packet.parameter === 4 || packet.parameter === 6)) return true;
   if (packet.category === 0 && packet.parameter === 8) return true;
@@ -235,6 +244,9 @@ export class CameraState {
   }
 
   setDeviceName(name: string): void {
+    if (deviceNameLooksLikeAtemSwitcher(name)) {
+      return;
+    }
     this.update(["deviceName"], (draft) => {
       draft.deviceName = name;
     });
@@ -686,6 +698,21 @@ function applyDecoded(
       } else if (packet.parameter === 2) {
         snapshot.offSpeedFrameRate = v0;
         mark("offSpeedFrameRate");
+      } else if (packet.parameter === 6) {
+        // Storage media: last value is chassis / slate camera ID (e.g. `[0, 6]` → camera 6).
+        const tail = packet.values.length > 0 ? packet.values[packet.values.length - 1]! : undefined;
+        if (
+          typeof tail === "number" &&
+          Number.isFinite(tail) &&
+          tail >= 1 &&
+          tail <= 255
+        ) {
+          const id = Math.trunc(tail);
+          snapshot.cameraNumber = id;
+          mark("cameraNumber");
+          snapshot.metadata.cameraId = String(id);
+          mark("metadata.cameraId");
+        }
       }
       break;
     case 10: // Media / transport
@@ -813,6 +840,13 @@ function relayMergeImportedSnapshot(base: CameraSnapshot, p: Partial<CameraSnaps
       typeof p.autoWhiteBalanceActive === "boolean"
         ? p.autoWhiteBalanceActive
         : base.autoWhiteBalanceActive,
+    cameraNumber:
+      typeof p.cameraNumber === "number" &&
+      Number.isFinite(p.cameraNumber) &&
+      p.cameraNumber >= 1 &&
+      p.cameraNumber <= 255
+        ? Math.round(p.cameraNumber)
+        : base.cameraNumber,
     gainDb: typeof p.gainDb === "number" && !Number.isNaN(p.gainDb) ? p.gainDb : base.gainDb,
     exposureUs:
       typeof p.exposureUs === "number" && !Number.isNaN(p.exposureUs) ? p.exposureUs : base.exposureUs,
@@ -822,7 +856,14 @@ function relayMergeImportedSnapshot(base: CameraSnapshot, p: Partial<CameraSnaps
     ndFilterStops: typeof p.ndFilterStops === "number" ? p.ndFilterStops : base.ndFilterStops,
     ndFilterDisplayMode:
       typeof p.ndFilterDisplayMode === "number" ? p.ndFilterDisplayMode : base.ndFilterDisplayMode,
-    deviceName: typeof p.deviceName === "string" && p.deviceName.length > 0 ? p.deviceName : base.deviceName,
+    deviceName: (() => {
+      const incoming =
+        typeof p.deviceName === "string" && p.deviceName.length > 0 ? p.deviceName : undefined;
+      if (incoming && deviceNameLooksLikeAtemSwitcher(incoming)) {
+        return base.deviceName;
+      }
+      return incoming !== undefined ? incoming : base.deviceName;
+    })(),
   };
 
   next.updatedKeys = ["relay-bootstrap"];

@@ -4,6 +4,8 @@ import type { Duplex } from "node:stream";
 import { URL } from "node:url";
 import type { WebSocket as WsType } from "ws";
 import { WebSocketServer } from "ws";
+import { decodeConfigurationPacket } from "../../src/blackmagic/protocol.js";
+import { bleDecodedHandledByAtemBridge } from "../../src/relay/atemBleForwardGuard.js";
 import { AtemCcuRoomBridge } from "../atem/atemCcuRoomBridge.js";
 
 /**
@@ -44,7 +46,13 @@ export type RelayWireMessage =
   | { type: "panel_sync"; snapshot: Record<string, unknown> }
   | { type: "atem_ccu_ready"; address?: string; cameraId?: number }
   | { type: "atem_ccu_link"; connected: boolean; address?: string; cameraId?: number }
-  | { type: "atem_ccu_error"; message: string };
+  | { type: "atem_ccu_error"; message: string }
+  | { type: "atem_ccu_log"; message: string }
+  | {
+      type: "host_atem_ccu_register";
+      atemCcu: { address: string; port?: number; cameraId: number; inputs?: number };
+    }
+  | { type: "host_atem_ccu_stop" };
 
 type Room = {
   sessionId: string;
@@ -73,6 +81,29 @@ function isRelayWireMessage(v: unknown): v is RelayWireMessage {
   if (!v || typeof v !== "object") return false;
   const t = (v as { type?: unknown }).type;
   return typeof t === "string";
+}
+
+function relayHexToBytes(hex: string): Uint8Array {
+  const clean = hex.replace(/\s+/g, "");
+  if (clean.length % 2 !== 0) throw new Error("Invalid hex length");
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+/** Joiner `forward_cmd` bytes that the hub applies via ATEM CCU (not the host BLE leg). */
+function joinerForwardCmdPreferAtemBridge(hex: string): boolean {
+  const trimmed = hex.trim();
+  if (!trimmed) return false;
+  try {
+    const bytes = relayHexToBytes(trimmed);
+    const decoded = decodeConfigurationPacket(bytes);
+    return !!(decoded && bleDecodedHandledByAtemBridge(decoded));
+  } catch {
+    return false;
+  }
 }
 
 export class RelayCoordinator {
@@ -216,6 +247,91 @@ export class RelayCoordinator {
     this.redis = undefined;
   }
 
+  private disposeAtemBridge(room: Room): void {
+    if (room.atemBridge) {
+      room.atemBridge.dispose();
+      room.atemBridge = undefined;
+    }
+  }
+
+  private parseAtemCcuRaw(acRaw: unknown): {
+    address: string;
+    port?: number;
+    cameraId: number;
+    inputs?: number;
+  } | null {
+    if (!acRaw || typeof acRaw !== "object" || acRaw === null) return null;
+    const ac = acRaw as {
+      address?: unknown;
+      port?: unknown;
+      cameraId?: unknown;
+      inputs?: unknown;
+    };
+    const address = String(ac.address ?? "").trim();
+    const cameraId = Math.round(Number(ac.cameraId));
+    const port =
+      ac.port !== undefined && ac.port !== null ? Math.round(Number(ac.port)) : undefined;
+    const inputs =
+      ac.inputs !== undefined && ac.inputs !== null ? Math.round(Number(ac.inputs)) : undefined;
+    if (!address || !Number.isFinite(cameraId) || cameraId < 1 || cameraId > 24) return null;
+    return { address, port, cameraId, inputs };
+  }
+
+  private startAtemBridgeFromPayload(
+    sessionId: string,
+    room: Room,
+    ac: { address: string; port?: number; cameraId: number; inputs?: number },
+  ): void {
+    const { address, port, cameraId, inputs } = ac;
+    const tcpPort = port !== undefined && Number.isFinite(port) && port > 0 ? port : 9910;
+    const inputSlots = Math.min(32, Math.max(4, inputs ?? 16));
+    const bridge = new AtemCcuRoomBridge(cameraId, inputSlots, {
+      emitPanelSync: (snapshot) => this.emitPanelSyncFromAtem(sessionId, snapshot),
+      hostSocket: () => room.host,
+      onAtemTcpLinkChange: (linked) => {
+        const h = room.host;
+        if (h?.readyState === 1) {
+          try {
+            h.send(
+              JSON.stringify({
+                type: "atem_ccu_link",
+                connected: linked,
+                address: linked ? address : undefined,
+                cameraId: linked ? cameraId : undefined,
+              } satisfies RelayWireMessage),
+            );
+          } catch {
+            /* ignore */
+          }
+        }
+        void this.refreshRedisMeta(room);
+      },
+      notifyHost: (message) => {
+        const h = room.host;
+        if (h?.readyState !== 1) return;
+        try {
+          h.send(JSON.stringify({ type: "atem_ccu_error", message } satisfies RelayWireMessage));
+        } catch {
+          /* ignore */
+        }
+      },
+      onHostLog: (message) => {
+        const line = JSON.stringify({ type: "atem_ccu_log", message } satisfies RelayWireMessage);
+        const h = room.host;
+        if (h?.readyState === 1) {
+          try {
+            h.send(line);
+          } catch {
+            /* ignore */
+          }
+        }
+        this.routeToJoiners(sessionId, line);
+      },
+    });
+    room.atemBridge = bridge;
+    void bridge.connect(address, tcpPort);
+  }
+
   private handleSocket(ws: WsType, _req: IncomingMessage): void {
     let roomId: string | undefined;
     let role: "host" | "join" | undefined;
@@ -238,10 +354,7 @@ export class RelayCoordinator {
       if (!roomId || role !== "host") return;
       const room = this.rooms.get(roomId);
       if (room?.host === ws) {
-        if (room.atemBridge) {
-          room.atemBridge.dispose();
-          room.atemBridge = undefined;
-        }
+        this.disposeAtemBridge(room);
         if (room.hostPingInterval) clearInterval(room.hostPingInterval);
         room.host = undefined;
         void this.refreshRedisMeta(room).catch(() => {});
@@ -295,52 +408,44 @@ export class RelayCoordinator {
           void this.refreshRedisMeta(room);
           ws.send(JSON.stringify({ type: "hosted", sessionId } satisfies RelayWireMessage));
 
-          const acRaw = (parsed as { atemCcu?: unknown }).atemCcu;
-          if (acRaw && typeof acRaw === "object" && acRaw !== null) {
-            const ac = acRaw as {
-              address?: unknown;
-              port?: unknown;
-              cameraId?: unknown;
-              inputs?: unknown;
-            };
-            const address = String(ac.address ?? "").trim();
-            const cameraId = Math.round(Number(ac.cameraId));
-            const port =
-              ac.port !== undefined && ac.port !== null ? Math.round(Number(ac.port)) : undefined;
-            const inputs =
-              ac.inputs !== undefined && ac.inputs !== null
-                ? Math.round(Number(ac.inputs))
-                : undefined;
-            if (!address || !Number.isFinite(cameraId) || cameraId < 1 || cameraId > 24) {
-              ws.send(JSON.stringify({ type: "atem_ccu_error", message: "Invalid atemCcu address or cameraId" }));
-              break;
+          const acParsed = this.parseAtemCcuRaw((parsed as { atemCcu?: unknown }).atemCcu);
+          if (acParsed) {
+            this.disposeAtemBridge(room);
+            this.startAtemBridgeFromPayload(sessionId, room, acParsed);
+          } else if ((parsed as { atemCcu?: unknown }).atemCcu) {
+            ws.send(JSON.stringify({ type: "atem_ccu_error", message: "Invalid atemCcu address or cameraId" }));
+          }
+          break;
+        }
+
+        case "host_atem_ccu_register": {
+          const hostRoomId = [...this.rooms.entries()].find(([, rr]) => rr.host === ws)?.[0];
+          if (!hostRoomId) return;
+          const hostRoom = this.rooms.get(hostRoomId);
+          if (!hostRoom || hostRoom.host !== ws) return;
+          const acParsed = this.parseAtemCcuRaw((parsed as { atemCcu?: unknown }).atemCcu);
+          if (!acParsed) {
+            ws.send(JSON.stringify({ type: "atem_ccu_error", message: "Invalid atemCcu address or cameraId" }));
+            return;
+          }
+          this.disposeAtemBridge(hostRoom);
+          this.startAtemBridgeFromPayload(hostRoomId, hostRoom, acParsed);
+          break;
+        }
+
+        case "host_atem_ccu_stop": {
+          const stopRoomId = [...this.rooms.entries()].find(([, rr]) => rr.host === ws)?.[0];
+          if (!stopRoomId) return;
+          const stopRoom = this.rooms.get(stopRoomId);
+          if (!stopRoom || stopRoom.host !== ws) return;
+          this.disposeAtemBridge(stopRoom);
+          void this.refreshRedisMeta(stopRoom);
+          if (ws.readyState === 1) {
+            try {
+              ws.send(JSON.stringify({ type: "atem_ccu_link", connected: false } satisfies RelayWireMessage));
+            } catch {
+              /* ignore */
             }
-            const tcpPort = port !== undefined && Number.isFinite(port) && port > 0 ? port : 9910;
-            const inputSlots = Math.min(32, Math.max(4, inputs ?? 16));
-            const bridge = new AtemCcuRoomBridge(cameraId, inputSlots, {
-              emitPanelSync: (snapshot) => this.emitPanelSyncFromAtem(sessionId, snapshot),
-              hostSocket: () => room.host,
-              onAtemTcpLinkChange: (linked) => {
-                const h = room.host;
-                if (h?.readyState === 1) {
-                  try {
-                    h.send(
-                      JSON.stringify({
-                        type: "atem_ccu_link",
-                        connected: linked,
-                        address: linked ? address : undefined,
-                        cameraId: linked ? cameraId : undefined,
-                      } satisfies RelayWireMessage),
-                    );
-                  } catch {
-                    /* ignore */
-                  }
-                }
-                void this.refreshRedisMeta(room);
-              },
-            });
-            room.atemBridge = bridge;
-            void bridge.connect(address, tcpPort);
           }
           break;
         }
@@ -419,10 +524,13 @@ export class RelayCoordinator {
               ? ((parsed as { hex: string }).hex as string)
               : "";
           if (room?.atemBridge && hex.trim()) {
-            void room.atemBridge.handleForwardCmdHex(hex).catch((err: unknown) => {
-              console.warn("[relay] ATEM forward_cmd failed:", err);
-            });
-            return;
+            const fromJoiner = room.clients.has(ws);
+            if (!fromJoiner || joinerForwardCmdPreferAtemBridge(hex)) {
+              void room.atemBridge.handleForwardCmdHex(hex).catch((err: unknown) => {
+                console.warn("[relay] ATEM forward_cmd failed:", err);
+              });
+              return;
+            }
           }
           if (room?.host === ws) return;
           this.routeToHost(id, raw);
@@ -435,9 +543,6 @@ export class RelayCoordinator {
           const id = this.findSessionForSocket(ws);
           if (!id) return;
           const room = this.rooms.get(id);
-          if (room?.atemBridge && parsed.type !== "shared_session_dirty") {
-            return;
-          }
           if (room?.host === ws) return;
           this.routeToHost(id, raw);
           break;
@@ -499,10 +604,7 @@ export class RelayCoordinator {
   private closeRoomAsHost(sessionId: string): void {
     const room = this.rooms.get(sessionId);
     if (!room) return;
-    if (room.atemBridge) {
-      room.atemBridge.dispose();
-      room.atemBridge = undefined;
-    }
+    this.disposeAtemBridge(room);
     if (room.hostPingInterval) clearInterval(room.hostPingInterval);
     if (room.host) {
       try {

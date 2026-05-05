@@ -145,6 +145,11 @@ export class RelayJoinedCameraClient implements CameraClient {
             if (snap && typeof snap === "object") this.params.onRelayPanelSync?.(snap);
             break;
           }
+          case "atem_ccu_log": {
+            const msg = (parsed as { message?: string }).message ?? "";
+            if (msg) this.params.log(msg);
+            break;
+          }
           case "session_ended": {
             const hadJoined = this.acknowledged;
             if (hadJoined) this.params.log("Host stopped sharing");

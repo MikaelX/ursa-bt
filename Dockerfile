@@ -31,6 +31,7 @@ RUN npm ci --omit=dev --ignore-scripts
 COPY server ./server
 COPY src/banks ./src/banks
 COPY src/blackmagic ./src/blackmagic
+COPY src/relay ./src/relay
 COPY --from=build /app/dist ./dist
 
 RUN mkdir -p /data

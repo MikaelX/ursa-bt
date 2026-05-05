@@ -301,8 +301,8 @@ export function atemCcuTraceLogLineCompact(trace: Record<string, unknown>): stri
     pieces.push(`${unh.length} unhandled CC`);
   }
 
-  const mic = trace.ccuMicLevel;
-  if (typeof mic === "number") pieces.push(`mic level ${mic}`);
+  const ar = trace.atemRaw;
+  if (Array.isArray(ar) && ar.length > 0) pieces.push(`atemRaw ×${ar.length}`);
 
   return pieces.join(" │ ") || "—";
 }

@@ -426,12 +426,27 @@ describe("createApp", () => {
     click(root.querySelector('[data-stepper-down="tint"]')!);
     await flushPromises();
 
-    expect(client.writeCommand).toHaveBeenCalledWith(commands.gain(1));
+    expect(client.writeCommand).toHaveBeenCalledWith(commands.gain(2));
     expect(client.writeCommand).toHaveBeenCalledWith(commands.iso(500));
     expect(client.writeCommand).toHaveBeenCalledWith(commands.shutterAngle(172.8));
     expect(client.writeCommand).toHaveBeenCalledWith(commands.whiteBalance(5700, 0));
     expect(client.writeCommand).toHaveBeenCalledWith(commands.whiteBalance(5600, 5));
     expect(client.writeCommand).toHaveBeenCalledWith(commands.whiteBalance(5600, -5));
+  });
+
+  it("URSA Broadcast G2 steps master gain by 1 dB (not G1 2 dB ladder)", async () => {
+    const root2 = document.createElement("div");
+    const client2 = createFakeClient({ deviceName: "Blackmagic URSA Broadcast G2" });
+    const banks2 = createFakeBanks();
+    createApp(root2, { client: client2, banks: banks2 });
+    click(root2.querySelector("[data-connect-toggle]")!);
+    await flushPromises();
+    (client2.writeCommand as ReturnType<typeof vi.fn>).mockClear();
+
+    click(root2.querySelector('[data-stepper-up="gain"]')!);
+    await flushPromises();
+
+    expect(client2.writeCommand).toHaveBeenCalledWith(commands.gain(1));
   });
 
   it("formatNd uses URSA dial labels CLR 2 3 4 and one decimal off-ladder", () => {

@@ -3,6 +3,7 @@
  * Relay `__atemCcuTrace` merges the same audio/tally keys as `scripts/atem-ccu-watch.ts` stdout
  * (`audioTallyBucketTraceSummary`, then `ccuAudioTallyToSnapshotPatch` for `tally`, etc.).
  * Non–CC wire frames (Fairlight, …) appear as `wireCommands` (see `atemWireCommandsTrace.ts`).
+ * Hub-only: each batch may include `atemRaw: string[]` (`[atem-raw] …` lines, default on) for the app debug log; set `ATEM_CCU_RELAY_RAW_TO_TRACE=0` on the server to omit.
  */
 import type { AtemCameraControlState } from "@atem-connection/camera-control";
 

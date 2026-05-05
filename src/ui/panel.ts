@@ -1,4 +1,4 @@
-import type { CameraSnapshot } from "../blackmagic/cameraState";
+import { deviceNameLooksLikeAtemSwitcher, type CameraSnapshot } from "../blackmagic/cameraState";
 import { BANK_COUNT, SCENE_SLOT_COUNT } from "../banks/bank";
 import { formatSegSignedFixed2, populateSegSlots } from "./segmentDisplay";
 
@@ -532,7 +532,7 @@ function renderConnectView(bleAvailable: boolean, bleUi?: PanelBleUiOptions): st
           <h2 class="connect-atem-title">LAN camera control</h2>
         </div>
         <p class="muted connect-atem-hint">
-          Hub must reach the switcher on your LAN (e.g. <code class="connect-atem-code">npm run dev:server</code>). Same CCU path as Share → ATEM.
+          Hub must reach the switcher on your LAN (e.g. <code class="connect-atem-code">npm run dev:server</code>). A relay session is opened automatically; CCU debug lines (<code class="connect-atem-code">[ccu h]</code>) appear in the log below once data flows.
         </p>
         <div class="connect-atem-row">
           <label class="connect-atem-inline-field connect-atem-inline-field--address">
@@ -1149,14 +1149,52 @@ function renderDebugView(): string {
         </ul>
       </section>
 
-      <section class="card">
-        <label class="debug-atem-sync-toggle">
-          <input type="checkbox" data-debug-atem-sync />
-          <span>Compact ATEM CCU trace in Debug log. Optional: <code>localStorage</code> key <code>bm-debug-atem-ccu-json=1</code> for full JSON lines.</span>
-        </label>
-        <p class="muted debug-atem-sync-hint">
-          One line per update, e.g. <code>[ccu h] time 22:33:58.444 │ camera 7 │ note atem_wire │ lens: iris 5.63, gain 0 dB │ FairlightMixerSourceUpdateCommand — gain -525, fader -740, balance 2250</code>. Host <code>h</code>, joiner <code>j</code>.
-        </p>
+      <section class="card debug-settings-card">
+        <div class="card-header">
+          <h2>Settings</h2>
+          <span class="readout-label">local</span>
+        </div>
+        <ul class="debug-settings-list" aria-label="Debug and developer settings">
+          <li class="debug-settings-row">
+            <label class="debug-settings-label">
+              <input type="checkbox" data-debug-atem-sync checked />
+              <span class="debug-settings-text">
+                <span class="debug-settings-name">ATEM CCU compact trace</span>
+                <span class="debug-settings-desc muted">Short lines + catalogue in the log for each panel_sync (on by default; turn off here).</span>
+              </span>
+            </label>
+          </li>
+          <li class="debug-settings-row">
+            <label class="debug-settings-label">
+              <input type="checkbox" data-debug-atem-ccu-json />
+              <span class="debug-settings-text">
+                <span class="debug-settings-name">ATEM CCU full JSON</span>
+                <span class="debug-settings-desc muted">Log full trace JSON when compact trace is on.</span>
+              </span>
+            </label>
+          </li>
+          <li class="debug-settings-row">
+            <span class="debug-settings-text">
+              <span class="debug-settings-name">ATEM raw in log</span>
+              <span class="debug-settings-desc muted">Hub sends <code class="connect-atem-code">[atem-raw]</code> lines (incl. <code class="connect-atem-code">TimeCommand</code>) by default; set <code class="connect-atem-code">ATEM_CCU_RELAY_RAW_TO_TRACE=0</code> on the server to stop. Optional <code class="connect-atem-code">ATEM_CCU_RELAY_RAW_MAX=256</code>.</span>
+            </span>
+          </li>
+          <li class="debug-settings-row">
+            <label class="debug-settings-label">
+              <input type="checkbox" data-debug-relay-localhost />
+              <span class="debug-settings-text">
+                <span class="debug-settings-name">Relay hub → localhost</span>
+                <span class="debug-settings-desc muted">Use <code>127.0.0.1:5173</code> for relay WS + session list (Vite proxies <code>/api</code>).</span>
+                <span class="debug-settings-note muted">
+                  From <code>https://</code>, <code>ws://127.0.0.1</code> is often blocked — open the app over <code>http://localhost:5173</code> when this is on.
+                </span>
+              </span>
+            </label>
+          </li>
+        </ul>
+      </section>
+
+      <section class="card debug-log-card">
         <div class="log-header">
           <h2>Debug Log</h2>
           <button class="bm-btn" type="button" data-clear-log>Clear</button>
@@ -1377,6 +1415,52 @@ export function isUrsaCameraName(raw: string | undefined): boolean {
   return raw.toUpperCase().includes("URSA");
 }
 
+/** Original URSA Broadcast (not G2): sensor master gain steps in 2 dB from −6 dB to +18 dB. */
+export function isUrsaBroadcastG1CameraName(raw: string | undefined): boolean {
+  if (!raw?.trim()) return false;
+  const u = raw.toUpperCase();
+  if (!u.includes("URSA") || !u.includes("BROADCAST")) return false;
+  if (u.includes("G2")) return false;
+  return true;
+}
+
+export type MasterGainStepDirection = 1 | -1;
+
+const URSA_BROADCAST_G1_GAIN_DB: readonly number[] = (() => {
+  const min = -6;
+  const max = 18;
+  const step = 2;
+  const n = (max - min) / step + 1;
+  return Array.from({ length: n }, (_, i) => min + i * step);
+})();
+
+/**
+ * Next master gain (dB) for stepper buttons: G1 Broadcast uses a −6…+18 dB ladder in 2 dB steps; other bodies use ±1 dB within {@link MASTER_GAIN_RANGE}.
+ */
+export function stepMasterGainDb(
+  current: number,
+  direction: MasterGainStepDirection,
+  rawDeviceName: string | undefined,
+): number {
+  if (isUrsaBroadcastG1CameraName(rawDeviceName)) {
+    const ladder = URSA_BROADCAST_G1_GAIN_DB;
+    let bestI = 0;
+    let bestDist = Infinity;
+    for (let i = 0; i < ladder.length; i++) {
+      const v = ladder[i]!;
+      const d = Math.abs(v - current);
+      if (d < bestDist) {
+        bestDist = d;
+        bestI = i;
+      }
+    }
+    const nextI = Math.min(Math.max(bestI + direction, 0), ladder.length - 1);
+    return ladder[nextI]!;
+  }
+  const next = Math.round(current + direction);
+  return Math.min(Math.max(next, MASTER_GAIN_RANGE.min), MASTER_GAIN_RANGE.max);
+}
+
 export function formatCameraProductLabel(raw: string | undefined): string {
   if (!raw?.trim()) return "";
   const u = raw.toUpperCase();
@@ -1399,7 +1483,7 @@ export function updateAppHeaderCameraProduct(root: HTMLElement, rawName: string 
   const el = root.querySelector<HTMLElement>("[data-camera-product]");
   if (!el) return;
   const trimmed = rawName?.trim();
-  if (!trimmed) {
+  if (!trimmed || deviceNameLooksLikeAtemSwitcher(trimmed)) {
     el.hidden = true;
     el.textContent = "";
     el.removeAttribute("title");
@@ -1562,6 +1646,7 @@ function updateCameraBadge(root: HTMLElement, cameraNumber: number | undefined):
 // Fader / iris / paint numeric mapping helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** Continuous master-gain span for most bodies (e.g. URSA Broadcast G2). Original URSA Broadcast uses {@link stepMasterGainDb} (−6…+18 dB, 2 dB steps). */
 export const MASTER_GAIN_RANGE = { min: -12, max: 30 };
 export const MASTER_BLACK_RANGE = { min: -2, max: 2 };
 
@@ -1827,6 +1912,16 @@ function updateLeds(
   const pvw = root.querySelector<HTMLElement>('[data-tally="preview"]');
   if (pgm) pgm.classList.toggle("on", snapshot.tally?.programMe === true);
   if (pvw) pvw.classList.toggle("on", snapshot.tally?.previewMe === true);
+
+  syncViewportTallyBorder(root, snapshot.tally?.programMe === true, snapshot.tally?.previewMe === true);
+}
+
+/** Program (red) wins over preview (green); see `.panel-app` tally `::before` in styles.css. */
+function syncViewportTallyBorder(root: HTMLElement, programOn: boolean, previewOn: boolean): void {
+  const panel = root.querySelector<HTMLElement>(".panel-app");
+  if (!panel) return;
+  panel.classList.toggle("viewport-tally--program", programOn);
+  panel.classList.toggle("viewport-tally--preview", previewOn && !programOn);
 }
 
 function updateRecording(root: HTMLElement, recording: boolean): void {

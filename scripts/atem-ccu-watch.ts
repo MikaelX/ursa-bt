@@ -30,7 +30,8 @@ import {
   type CcuAudioTallyBucket,
 } from "../server/atem/ccuAudioTallyApply.js";
 import { lensVideoSummary } from "../server/atem/ccuWatchStyleTrace.js";
-import { collectCameraControlUpdates, isCameraControlUpdateLike } from "../server/atem/collectCameraControlUpdates.js";
+import { collectCameraControlUpdates } from "../server/atem/collectCameraControlUpdates.js";
+import { logRawReceivedCommands } from "../server/atem/logRawReceivedCommands.js";
 
 /** Camera Control category id for Audio (BMD SDI Camera Control spec). */
 const CC_AUDIO = 2;
@@ -69,68 +70,6 @@ function parseArgs(): {
   }
   if (rawAll) sparse = false;
   return { host, inputs, verbose, ccAudioRaw: ccAudioRaw && !rawAll, rawAll, sparse: sparse && !rawAll };
-}
-
-function jsonSafeForLog(value: unknown, depth = 0): unknown {
-  if (depth > 14) return "[max-depth]";
-  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return value;
-  }
-  if (typeof value === "bigint") return value.toString();
-  if (value instanceof Uint8Array) {
-    return { __type: "Uint8Array", hex: Buffer.from(value).toString("hex") };
-  }
-  if (typeof Buffer !== "undefined" && Buffer.isBuffer(value)) {
-    return { __type: "Buffer", hex: value.toString("hex") };
-  }
-  if (Array.isArray(value)) return value.map((x) => jsonSafeForLog(x, depth + 1));
-  if (typeof value === "object") {
-    const o = value as Record<string, unknown>;
-    const out: Record<string, unknown> = {};
-    for (const k of Object.keys(o)) {
-      try {
-        out[k] = jsonSafeForLog(o[k], depth + 1);
-      } catch {
-        out[k] = "[unreadable]";
-      }
-    }
-    return out;
-  }
-  return String(value);
-}
-
-/** One stderr line per deserialized command (what `atem-connection` emits on `receivedCommands`). */
-function logRawReceivedCommands(commands: unknown[], batchTs: string): void {
-  commands.forEach((cmd, batchIndex) => {
-    if (typeof cmd !== "object" || cmd === null) {
-      console.error("[atem-raw]", JSON.stringify({ ts: batchTs, batchIndex, kind: typeof cmd }));
-      return;
-    }
-    const ctor = (cmd as { constructor?: { name?: string; rawName?: string } }).constructor;
-    const rawName = ctor?.rawName;
-    const base: Record<string, unknown> = {
-      ts: batchTs,
-      batchIndex,
-      ctor: ctor?.name,
-      rawName,
-    };
-    if (isCameraControlUpdateLike(cmd)) {
-      const cc = cmd as Commands.CameraControlUpdateCommand;
-      base.kind = "CameraControlUpdate";
-      base.source = cc.source;
-      base.category = cc.category;
-      base.parameter = cc.parameter;
-      base.properties = jsonSafeForLog(cc.properties);
-    } else {
-      const c = cmd as Record<string, unknown>;
-      if ("properties" in c) base.properties = jsonSafeForLog(c.properties);
-    }
-    try {
-      console.error("[atem-raw]", JSON.stringify(base));
-    } catch (e) {
-      console.error("[atem-raw]", JSON.stringify({ ts: batchTs, batchIndex, ctor: base.ctor, error: String(e) }));
-    }
-  });
 }
 
 function logRawAudioCcIfRequested(cmds: Commands.CameraControlUpdateCommand[], enabled: boolean): void {
@@ -179,7 +118,7 @@ async function main(): Promise<void> {
 
   atem.on("receivedCommands", (commands) => {
     const batchTs = new Date().toISOString();
-    if (rawAll) logRawReceivedCommands(commands, batchTs);
+    if (rawAll) logRawReceivedCommands(commands, batchTs, (line) => console.error(line));
 
     const cameraCommands = collectCameraControlUpdates(commands);
     if (cameraCommands.length === 0) return;

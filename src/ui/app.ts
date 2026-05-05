@@ -16,11 +16,14 @@ import { nullBleCameraClient } from "../relay/nullBleCameraClient";
 import { RelayHostSession, type AtemCcuRelayRegister } from "../relay/relayHostSession";
 import { bleDecodedHandledByAtemBridge } from "../relay/atemBleForwardGuard";
 import { blePacketsFromAtemPanelSyncClean } from "../relay/atemPanelSyncMirrorBle";
-import { atemCcuTraceLogLineCompact } from "../relay/atemCcuDebugCatalogue";
-import { getRelaySessionsUrl, getRelaySocketUrl } from "../relay/relayUrl";
+import { atemCcuTraceCatalogueLines, atemCcuTraceLogLineCompact } from "../relay/atemCcuDebugCatalogue";
+import {
+  DEBUG_RELAY_HUB_LOCALHOST_LS,
+  getRelaySessionsUrl,
+  getRelaySocketUrl,
+} from "../relay/relayUrl";
 import {
   MASTER_BLACK_RANGE,
-  MASTER_GAIN_RANGE,
   PAINT_CHANNELS,
   PAINT_GROUPS,
   PAINT_RANGE,
@@ -42,6 +45,7 @@ import {
   showGenericWebBleHelpModal,
   isIosLikeWebBluetoothBlocked,
   irisTbarDragRangePx,
+  stepMasterGainDb,
   updatePanel,
   updateSceneBanks,
   writePaintSegReadout,
@@ -93,6 +97,9 @@ const RELAY_SCENE_FILLED_KEY = "__relaySceneFilledSlots";
 /** Must match {@link ATEM_CCU_TRACE_SNAPSHOT_KEY} in `server/atem/ccuWatchStyleTrace.ts`. */
 const RELAY_ATEM_CCU_TRACE_KEY = "__atemCcuTrace";
 
+/** Spacing between BLE configuration writes while dragging continuous controls (faders, iris bar, paint knobs). Tunable trade-off: lower = snappier UI, higher = less GATT pressure. */
+const BLE_POINTER_DRAG_SEND_INTERVAL_MS = 60;
+
 const RELAY_PANEL_SYNC_SIDE_KEYS = [
   RELAY_BANKS_REVISION_KEY,
   RELAY_LOADED_SLOT_KEY,
@@ -103,6 +110,64 @@ const RELAY_PANEL_SYNC_SIDE_KEYS = [
 function stripRelayPanelSideKeys(snap: Record<string, unknown>): Record<string, unknown> {
   const out = { ...snap };
   for (const k of RELAY_PANEL_SYNC_SIDE_KEYS) delete out[k];
+  return out;
+}
+
+function isPlainRecord(x: unknown): x is Record<string, unknown> {
+  return x !== null && typeof x === "object" && !Array.isArray(x);
+}
+
+/** Deep-merge partial `panel_sync` payloads so rapid ATEM CCU updates (e.g. gain dB) collapse to the latest nested values. */
+function deepMergeRelayPanelClean(
+  base: Record<string, unknown>,
+  incoming: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...base };
+  for (const [k, v] of Object.entries(incoming)) {
+    if (isPlainRecord(v) && isPlainRecord(out[k])) {
+      out[k] = deepMergeRelayPanelClean(out[k] as Record<string, unknown>, v);
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+function cloneRelayPanelCleanForBleMerge(clean: Record<string, unknown>): Record<string, unknown> {
+  try {
+    return JSON.parse(JSON.stringify(clean)) as Record<string, unknown>;
+  } catch {
+    return { ...clean };
+  }
+}
+
+function stableRelayValue(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function changedRelayPanelCleanForBleMirror(
+  current: Record<string, unknown>,
+  incoming: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(incoming)) {
+    const prev = current[key];
+    if (isPlainRecord(value) && isPlainRecord(prev)) {
+      const hasNestedCommandGroup = Object.values(value).some(isPlainRecord);
+      if (!hasNestedCommandGroup) {
+        if (stableRelayValue(value) !== stableRelayValue(prev)) out[key] = value;
+        continue;
+      }
+      const child = changedRelayPanelCleanForBleMirror(prev, value);
+      if (Object.keys(child).length > 0) out[key] = child;
+      continue;
+    }
+    if (stableRelayValue(value) !== stableRelayValue(prev)) out[key] = value;
+  }
   return out;
 }
 
@@ -143,6 +208,48 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   const ATEM_PANEL_SYNC_DEBUG_LS = "bm-debug-atem-panel-sync";
   const ATEM_CCU_TRACE_JSON_LS = "bm-debug-atem-ccu-json";
 
+  /** Catalogue + JSON trace extras; default on unless user set `localStorage` to `"0"`. */
+  function atemPanelSyncDebugExtrasEnabled(): boolean {
+    try {
+      return localStorage.getItem(ATEM_PANEL_SYNC_DEBUG_LS) !== "0";
+    } catch {
+      return true;
+    }
+  }
+
+  const lastAtemMixerSnapshotSigByTag: Record<string, string> = {};
+  let joinRelAtemMixerDebugPrimed = false;
+
+  function syncAtemCompactTraceCheckboxFromStorage(): void {
+    const el = root.querySelector<HTMLInputElement>("[data-debug-atem-sync]");
+    if (!el) return;
+    try {
+      el.checked = atemPanelSyncDebugExtrasEnabled();
+    } catch {
+      el.checked = true;
+    }
+  }
+
+  /** Turn on compact CCU trace lines + catalogue without opening Debug first (hub ATEM host or join). */
+  function enableAtemMixerDebugDefaults(): void {
+    try {
+      localStorage.setItem(ATEM_PANEL_SYNC_DEBUG_LS, "1");
+    } catch {
+      /* ignore */
+    }
+    syncAtemCompactTraceCheckboxFromStorage();
+  }
+
+  function primeJoinAtemMixerDebugFromSnap(rec: Record<string, unknown>): void {
+    if (joinRelAtemMixerDebugPrimed) return;
+    const tr = rec[RELAY_ATEM_CCU_TRACE_KEY];
+    const hasTrace = tr !== null && tr !== undefined && typeof tr === "object";
+    if (!isLikelyAtemPanelSyncSnapshot(rec) && !hasTrace) return;
+    joinRelAtemMixerDebugPrimed = true;
+    enableAtemMixerDebugDefaults();
+    log("ATEM CCU: debug trace enabled for this join (same as Debug → ATEM CCU compact trace).");
+  }
+
   function atemDebugShortSource(src: string): string {
     if (src === "atem-host") return "h";
     if (src === "relay-join") return "j";
@@ -156,12 +263,32 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
 
   function logAtemMixerPanelSyncDebug(raw: Record<string, unknown>, source: string): void {
     try {
-      if (localStorage.getItem(ATEM_PANEL_SYNC_DEBUG_LS) !== "1") return;
       const trace = raw[RELAY_ATEM_CCU_TRACE_KEY];
-      if (trace && typeof trace === "object") {
+      const tag = atemDebugShortSource(source);
+      const debugExtrasOn = atemPanelSyncDebugExtrasEnabled();
+      if (trace !== null && trace !== undefined && typeof trace === "object") {
         const t = trace as Record<string, unknown>;
-        const tag = atemDebugShortSource(source);
         log(`[ccu ${tag}] ${atemCcuTraceLogLineCompact(t)}`);
+
+        const rawLines = t.atemRaw;
+        if (Array.isArray(rawLines) && rawLines.length > 0) {
+          const maxLines = 300;
+          const maxChars = 12_000;
+          const cap = Math.min(rawLines.length, maxLines);
+          for (let i = 0; i < cap; i++) {
+            const ln = rawLines[i];
+            if (typeof ln !== "string") continue;
+            const body = ln.length > maxChars ? `${ln.slice(0, maxChars)}…(+${ln.length - maxChars})` : ln;
+            log(`[ccu ${tag}] ${body}`);
+          }
+          if (rawLines.length > maxLines) {
+            log(`[ccu ${tag}] … omitted ${rawLines.length - maxLines} more atemRaw lines`);
+          }
+        }
+
+        if (!debugExtrasOn) return;
+        const lines = atemCcuTraceCatalogueLines(t);
+        for (const ln of lines) log(`[ccu ${tag}] ${ln}`);
         if (localStorage.getItem(ATEM_CCU_TRACE_JSON_LS) === "1") {
           const line = JSON.stringify(trace);
           const max = 8000;
@@ -172,10 +299,21 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
         }
         return;
       }
+      if (source === "atem-host" || source === "relay-join") {
+        const mixerSig = JSON.stringify({
+          gainDb: raw.gainDb,
+          iso: raw.iso,
+          tally: raw.tally,
+        });
+        if (mixerSig !== lastAtemMixerSnapshotSigByTag[tag]) {
+          lastAtemMixerSnapshotSigByTag[tag] = mixerSig;
+          log(`[ccu ${tag}] mixer ${mixerSig}`);
+        }
+      }
+      if (!debugExtrasOn) return;
       if (isLikelyAtemPanelSyncSnapshot(raw)) {
         const sideKeys = new Set<string>(RELAY_PANEL_SYNC_SIDE_KEYS);
         const keys = Object.keys(raw).filter((k) => !sideKeys.has(k));
-        const tag = atemDebugShortSource(source);
         log(
           `[ccu ${tag}] no ${RELAY_ATEM_CCU_TRACE_KEY} — ${keys.slice(0, 10).join(", ")}${keys.length > 10 ? "…" : ""}`,
         );
@@ -203,6 +341,8 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   let relayHostBridge: RelayHostSession | undefined;
   /** True after Join flow established a relay session with the host proxy. */
   let relayJoinedMode = false;
+  /** Host `sessionName` from the last successful Join — overrides stale relay prefs for ATEM CCU room naming. */
+  let relayJoinedDisplaySessionName: string | undefined;
   /** BLE GATT linked (device picked and connected locally). */
   let bleLinked = false;
 
@@ -305,7 +445,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       const [next, globalFile] = await Promise.all([banksApi.load(deviceId), banksApi.loadGlobalScenes()]);
       banks = next;
       if (banks.globalLoadedSlot === undefined) banks = { ...banks, globalLoadedSlot: null };
-      if (deviceId === ATEM_CCU_RELAY_DEVICE_ID) {
+      if (deviceId === ATEM_CCU_RELAY_DEVICE_ID || Boolean(banks.atemCcuRelay?.address?.trim())) {
         mergeAtemRelayFromServer(banks);
         syncAtemLanConnectUi?.();
       }
@@ -315,7 +455,10 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       renderBanks();
       if (deviceId !== ATEM_CCU_RELAY_DEVICE_ID) {
         const savedId = resolvedBodyCameraIdFromBank(banks.lastState);
-        if (savedId !== undefined) {
+        if (opts?.relayJoin && state.current.cameraNumber !== undefined) {
+          setOutgoingDestination(state.current.cameraNumber);
+          updatePanel(root, state.current, { localBleGattConnected: bleLinked && !relayJoinedMode });
+        } else if (savedId !== undefined) {
           const idStr = String(savedId);
           state.setCameraNumber(savedId);
           setOutgoingDestination(savedId);
@@ -396,6 +539,38 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     }
   }
 
+  /** Coalesced ATEM `panel_sync` slice for BLE mirror; drained by a single promise chain so writes cannot finish out of order. */
+  let atemBleMirrorCoalesced: Record<string, unknown> | null = null;
+  let atemBleMirrorChain: Promise<void> = Promise.resolve();
+
+  function resetAtemBleMirrorBleQueue(): void {
+    atemBleMirrorCoalesced = null;
+    atemBleMirrorChain = Promise.resolve();
+  }
+
+  function enqueueAtemPanelSyncMirrorBle(clean: Record<string, unknown>): void {
+    if (!rawClient.isConnected) return;
+    atemBleMirrorCoalesced =
+      atemBleMirrorCoalesced === null
+        ? cloneRelayPanelCleanForBleMerge(clean)
+        : deepMergeRelayPanelClean(atemBleMirrorCoalesced, clean);
+    atemBleMirrorChain = atemBleMirrorChain
+      .then(async () => {
+        const patch = atemBleMirrorCoalesced;
+        if (patch === null || Object.keys(patch).length === 0) return;
+        atemBleMirrorCoalesced = null;
+        const mirror = blePacketsFromAtemPanelSyncClean(patch);
+        for (const p of mirror) {
+          try {
+            await rawClient.writeCommand(withDestination(p, outgoingDestination));
+          } catch {
+            break;
+          }
+        }
+      })
+      .catch(() => undefined);
+  }
+
   function buildRelayPanelSyncEnvelope(): Record<string, unknown> {
     const snap = serializeCameraSnapshotForRelay(state.current);
     snap[RELAY_LOADED_SLOT_KEY] = unifiedLoadedSlotForUi();
@@ -460,6 +635,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       preGainDb === decoded.values[0];
     if (
       relayHostBridge?.isAtemCcuHost &&
+      !relayHostBridge.exclusiveAtemRelayHost &&
       relayHostBridge.atemSwitcherTcpConnected &&
       changedKeys.length > 0 &&
       bleDecodedHandledByAtemBridge(decoded) &&
@@ -500,6 +676,22 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     outgoingDestination = Math.max(0, Math.min(255, Math.round(dest)));
   };
 
+  /** After relay bootstrap / `panel_sync`, align BLE destination byte with host body index. */
+  const syncRelayJoinerDestinationFromState = (): void => {
+    const n = state.current.cameraNumber;
+    if (n !== undefined && Number.isFinite(n)) {
+      setOutgoingDestination(Math.trunc(n));
+      return;
+    }
+    const raw = state.current.metadata?.cameraId;
+    if (typeof raw === "string") {
+      const parsed = Number(raw);
+      if (Number.isFinite(parsed)) {
+        setOutgoingDestination(Math.max(0, Math.min(255, Math.round(parsed))));
+      }
+    }
+  };
+
   let relayJoinDelegate: RelayJoinedCameraClient | undefined;
   let lastRelayJoinSessionId: string | undefined;
   let relayJoinReconnectTimer: ReturnType<typeof setTimeout> | undefined;
@@ -518,14 +710,18 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
 
   const syncRelayHubButtons = (): void => {
     const hosting = !!relayHostBridge?.isActive;
-    const live = bleLinked || relayJoinedMode || !!relayHostBridge?.isAtemCcuHost;
+    /** BLE / Join hub only — ATEM mixer has its own row so hosting must not flip this button to Disconnect. */
+    const bleHubLive = bleLinked || relayJoinedMode;
 
     const connectToggle = root.querySelector<HTMLButtonElement>("[data-connect-toggle]");
     if (connectToggle) {
-      connectToggle.textContent = live ? "Disconnect" : "Connect";
-      connectToggle.setAttribute("aria-label", live ? "Disconnect from camera" : "Connect to camera");
-      connectToggle.classList.toggle("connect-primary", !live);
-      connectToggle.disabled = !live && !rawClient.isSupported;
+      connectToggle.textContent = bleHubLive ? "Disconnect" : "Connect";
+      connectToggle.setAttribute(
+        "aria-label",
+        bleHubLive ? "Disconnect Bluetooth or leave relay" : "Connect to camera over Bluetooth",
+      );
+      connectToggle.classList.toggle("connect-primary", !bleHubLive);
+      connectToggle.disabled = !bleHubLive && !rawClient.isSupported;
     }
 
     const shareToggle = root.querySelector<HTMLButtonElement>("[data-relay-share-toggle]");
@@ -620,6 +816,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     onLog: (message: string) => log(message),
     onDisconnect: () => {
       clearRelayHostPanelSyncDebouncer();
+      resetAtemBleMirrorBleQueue();
       relayHostBridge?.cleanup();
       relayHostBridge = undefined;
       reflectLocalBleLinkLost("Disconnected");
@@ -830,6 +1027,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       },
       onRelayBootstrapSnapshot: (snap) => {
         const rec = snap as Record<string, unknown>;
+        primeJoinAtemMixerDebugFromSnap(rec);
         const hints = readRelayLoadedSlotFromSnap(rec);
         const clean = stripRelayPanelSideKeys(rec);
         const br = rec[RELAY_BANKS_REVISION_KEY];
@@ -838,12 +1036,14 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
           state.hydrateFromRelayExport(clean);
         }
         applyRelayLoadedSlotHint(hints);
+        syncRelayJoinerDestinationFromState();
         const st = state.current.status;
         if (st) renderStatusFlags(root, st);
         log("Relay: full panel snapshot applied from host");
       },
       onRelayPanelSync: (snap) => {
         const rec = snap as Record<string, unknown>;
+        primeJoinAtemMixerDebugFromSnap(rec);
         logAtemMixerPanelSyncDebug(rec, "relay-join");
         const hints = readRelayLoadedSlotFromSnap(rec);
         const clean = stripRelayPanelSideKeys(rec);
@@ -851,7 +1051,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
           state.relayPanelSyncPatch(clean);
         }
         applyRelayLoadedSlotHint(hints);
-        log("Relay: panel snapshot merge");
+        syncRelayJoinerDestinationFromState();
         const banksRevRaw = snap[RELAY_BANKS_REVISION_KEY];
         const banksRev = typeof banksRevRaw === "number" ? banksRevRaw : undefined;
         if (banksRev !== undefined && banksRev !== lastRelayBanksRevisionSeen && activeDeviceId) {
@@ -862,11 +1062,16 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
         }
       },
       onJoinedInfo: (deviceId, sessionName) => {
+        const sn = sessionName.trim();
+        if (sn) relayJoinedDisplaySessionName = sn;
         log(`Relay joined: ${sessionName} (${deviceId})`);
       },
       onDropped: () => {
         relayJoinedMode = false;
+        relayJoinedDisplaySessionName = undefined;
         lastRelayBanksRevisionSeen = undefined;
+        joinRelAtemMixerDebugPrimed = false;
+        for (const k of Object.keys(lastAtemMixerSnapshotSigByTag)) delete lastAtemMixerSnapshotSigByTag[k];
         state.clearForLocalBleDisconnect();
         renderStatusFlags(root, disconnectedPlaceholderStatus());
         setConnection(root, "Disconnected", null);
@@ -896,6 +1101,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     connect: () => rawClient.connect(),
     disconnect: () => {
       clearRelayHostPanelSyncDebouncer();
+      resetAtemBleMirrorBleQueue();
       if (relayHostBridge?.isActive) {
         relayHostBridge.stopSharing();
       } else {
@@ -904,7 +1110,10 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       relayHostBridge = undefined;
       if (relayJoinedMode) {
         relayJoinedMode = false;
+        relayJoinedDisplaySessionName = undefined;
         lastRelayBanksRevisionSeen = undefined;
+        joinRelAtemMixerDebugPrimed = false;
+        for (const k of Object.keys(lastAtemMixerSnapshotSigByTag)) delete lastAtemMixerSnapshotSigByTag[k];
         clearRelayJoinReconnectSchedule();
         lastRelayJoinSessionId = undefined;
         clearRelayJoinRestore();
@@ -916,7 +1125,11 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     writeCommand: async (packet: Uint8Array) => {
       const dest = withDestination(packet, outgoingDestination);
       if (relayHostBridge?.isAtemCcuHost) {
-        if (rawClient.isConnected) await rawClient.writeCommand(dest);
+        // ATEM-only relay host uses `nullBleCameraClient`; do not mirror to a parallel Web Bluetooth
+        // session — same moment as `loadBanksFor` / color restore causes "GATT operation already in progress".
+        if (rawClient.isConnected && !relayHostBridge.exclusiveAtemRelayHost) {
+          await rawClient.writeCommand(dest);
+        }
         try {
           relayHostBridge.sendHostForwardCmd(packet);
         } catch {
@@ -978,6 +1191,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     if (backdrop) backdrop.hidden = true;
 
     relayJoinedMode = false;
+    relayJoinedDisplaySessionName = undefined;
     relayJoinTransport().cleanupQuiet();
     lastRelayBanksRevisionSeen = undefined;
 
@@ -985,6 +1199,10 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     try {
       const info = await relayJoinTransport().joinSession(sessionId);
       relayJoinedMode = true;
+      {
+        const dn = info.deviceName?.trim();
+        if (dn) relayJoinedDisplaySessionName = dn;
+      }
       relayJoinReconnectAttempt = 0;
       writeRelayJoinRestore({ sessionId, autoReconnect: joinAutoReconnect });
       setConnection(root, "Relay", null);
@@ -995,6 +1213,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       log(`Relay connected: "${info.deviceName}" via ${getRelaySocketUrl()}`);
     } catch (e) {
       relayJoinedMode = false;
+      relayJoinedDisplaySessionName = undefined;
       relayJoinTransport().cleanup();
       state.clearDeviceName();
       setConnection(root, "Disconnected", null);
@@ -1118,10 +1337,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     root.classList.toggle("panel-inactive", !panelActive);
     const connWrap = root.querySelector(".connection-controls");
     if (connWrap) {
-      connWrap.classList.toggle(
-        "is-ble-connected",
-        bleLinked || relayJoinedMode || !!relayHostBridge?.isAtemCcuHost,
-      );
+      connWrap.classList.toggle("is-ble-connected", bleLinked || relayJoinedMode);
     }
     const cameraIdCard = root.querySelector<HTMLElement>("[data-connect-camera-id-card]");
     if (cameraIdCard) cameraIdCard.hidden = !bleLinked;
@@ -1263,6 +1479,49 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     return Number.isFinite(raw) ? Math.min(24, Math.max(1, Math.round(raw))) : 1;
   }
 
+  /** BLE body index 1–255 → ATEM CCU source 1–24. */
+  function atemCameraIdFromBleBody(cam: number): number {
+    return clampAtemCameraId(cam);
+  }
+
+  /**
+   * While hosting a real camera over BLE, treat its `cameraNumber` as the ATEM mixer / CCU filter id:
+   * persist prefs, refresh the LAN row, and re-register the hub bridge when ATEM CCU is live.
+   */
+  function pushBleBodyCameraIdToAtemMixerFilter(cam: number): void {
+    if (!bleLinked || relayJoinedMode) return;
+    if (!activeDeviceId || activeDeviceId === ATEM_CCU_RELAY_DEVICE_ID) return;
+    const id = atemCameraIdFromBleBody(cam);
+    const curModal = relayPrefsForModal(ATEM_CCU_RELAY_DEVICE_ID);
+    writeRelayPrefs(ATEM_CCU_RELAY_DEVICE_ID, {
+      sessionName: curModal.sessionName,
+      share: curModal.share,
+      atemCcu: curModal.atemCcu,
+      atemAddress: curModal.atemAddress,
+      atemCameraId: id,
+    });
+    const cp = readRelayPrefs(activeDeviceId) ?? {};
+    writeRelayPrefs(activeDeviceId, {
+      ...cp,
+      atemCameraId: id,
+      ...(cp.sessionName === undefined ? { sessionName: curModal.sessionName } : {}),
+      ...(cp.share === undefined ? { share: curModal.share } : {}),
+      ...(cp.atemCcu === undefined ? { atemCcu: curModal.atemCcu } : {}),
+      ...(cp.atemAddress === undefined ? { atemAddress: curModal.atemAddress } : {}),
+    });
+    const camEl = root.querySelector<HTMLInputElement>("[data-atem-ccu-camera]");
+    if (camEl && document.activeElement !== camEl) camEl.value = String(id);
+    const addr = curModal.atemAddress.trim();
+    if (relayHostBridge?.isAtemCcuHost && relayHostBridge.isActive && addr) {
+      try {
+        relayHostBridge.attachAtemCcu({ address: addr, cameraId: id });
+      } catch (e: unknown) {
+        log(`ATEM CCU: re-register camera ${id} failed: ${errorMessage(e)}`);
+      }
+    }
+    syncAtemLanConnectUi?.();
+  }
+
   function relayPrefsForModal(deviceId: string): {
     sessionName: string;
     share: boolean;
@@ -1278,7 +1537,16 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     const atemCcu = Boolean(per?.atemCcu ?? glob?.atemCcu);
     const atemAddress = String(per?.atemAddress ?? glob?.atemAddress ?? "192.168.1.199").trim();
     const addrBucket = readRelayPrefs(atemLanPrefsDeviceKey(atemAddress));
+    const fromBleBody =
+      bleLinked &&
+      activeDeviceId &&
+      activeDeviceId !== ATEM_CCU_RELAY_DEVICE_ID &&
+      state.current.cameraNumber !== undefined &&
+      Number.isFinite(state.current.cameraNumber)
+        ? atemCameraIdFromBleBody(state.current.cameraNumber)
+        : undefined;
     const rawCam =
+      fromBleBody ??
       per?.atemCameraId ??
       glob?.atemCameraId ??
       addrBucket?.atemCameraId ??
@@ -1286,6 +1554,40 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       1;
     const atemCameraId = clampAtemCameraId(Number(rawCam));
     return { sessionName, share, atemCcu, atemAddress, atemCameraId };
+  }
+
+  /** One relay room name for BLE share and ATEM mixer so joiners see a single session. */
+  function effectiveAtemRelaySessionName(): string {
+    if (relayJoinedMode) {
+      const jn = relayJoinedDisplaySessionName?.trim();
+      if (jn) return jn;
+    }
+    if (activeDeviceId && activeDeviceId !== ATEM_CCU_RELAY_DEVICE_ID) {
+      const sp = readRelayPrefs(activeDeviceId)?.sessionName?.trim();
+      if (sp) return sp;
+    }
+    const g = readRelayPrefsGlobal()?.sessionName?.trim();
+    if (g) return g;
+    return relayPrefsForModal(ATEM_CCU_RELAY_DEVICE_ID).sessionName.trim();
+  }
+
+  /**
+   * Relay room name for {@link performAtemLanHost} when opening a new host socket.
+   * ATEM-only hub (`atem-ccu-host`) must not inherit another camera's session name (e.g. BLE "woho")
+   * or you advertise that share name while only debugging the mixer on the Connect tab.
+   */
+  function relaySessionNameForAtemLanHost(hostDeviceId: string): string {
+    if (hostDeviceId === ATEM_CCU_RELAY_DEVICE_ID) {
+      return relayPrefsForModal(ATEM_CCU_RELAY_DEVICE_ID).sessionName.trim() || "ATEM CCU";
+    }
+    return effectiveAtemRelaySessionName().trim() || "ATEM CCU";
+  }
+
+  function atemBanksPersistDeviceId(): string {
+    if (bleLinked && activeDeviceId && activeDeviceId !== ATEM_CCU_RELAY_DEVICE_ID) {
+      return activeDeviceId;
+    }
+    return ATEM_CCU_RELAY_DEVICE_ID;
   }
 
   function mergeAtemRelayFromServer(file: BanksFile): void {
@@ -1322,6 +1624,25 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       clearTimeout(atemLanReconnectTimer);
       atemLanReconnectTimer = undefined;
     }
+  }
+
+  /** Clears ATEM LAN timers and tears down any relay host session so Connect / Disconnect always start from a clean connector. */
+  function forceResetAtemLanRelayConnector(logLine?: string): void {
+    clearAtemLanReconnectSchedule();
+    atemLanReconnectAttempts = 0;
+    atemLanResumeInFlight = false;
+    clearRelayHostPanelSyncDebouncer();
+    resetAtemBleMirrorBleQueue();
+    for (const k of Object.keys(lastAtemMixerSnapshotSigByTag)) delete lastAtemMixerSnapshotSigByTag[k];
+    if (relayHostBridge) {
+      if (relayHostBridge.isActive) {
+        relayHostBridge.stopSharing();
+      } else {
+        relayHostBridge.cleanup();
+      }
+      relayHostBridge = undefined;
+    }
+    if (logLine) log(logLine);
   }
 
   syncAtemLanConnectUi = (): void => {
@@ -1386,7 +1707,6 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     deviceId: string,
     options?: { atemCcu?: AtemCcuRelayRegister },
   ): Promise<void> {
-    clearRelayHostPanelSyncDebouncer();
     const prev = relayHostBridge;
     if (prev) {
       if (prev.isActive) {
@@ -1396,8 +1716,11 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       }
       relayHostBridge = undefined;
     }
+    clearRelayHostPanelSyncDebouncer();
+    resetAtemBleMirrorBleQueue();
     const persistCameraId = deviceId;
-    const bleClient = options?.atemCcu ? nullBleCameraClient : rawClient;
+    const atemOnlyHost = options?.atemCcu && deviceId === ATEM_CCU_RELAY_DEVICE_ID;
+    const bleClient = atemOnlyHost ? nullBleCameraClient : rawClient;
 
     relayHostBridge = new RelayHostSession(bleClient, {
       log,
@@ -1433,21 +1756,17 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
         logAtemMixerPanelSyncDebug(snap, "atem-host");
         const clean = stripRelayPanelSideKeys(snap);
         if (Object.keys(clean).length > 0) {
+          const mirrorClean =
+            rawClient.isConnected && relayHostBridge !== undefined && !relayHostBridge.exclusiveAtemRelayHost
+              ? changedRelayPanelCleanForBleMirror(state.current as unknown as Record<string, unknown>, clean)
+              : {};
           state.relayPanelSyncPatch(clean);
           scheduleRelayHostPanelSync();
-          if (rawClient.isConnected) {
-            const mirror = blePacketsFromAtemPanelSyncClean(clean);
-            if (mirror.length > 0) {
-              void (async () => {
-                for (const p of mirror) {
-                  try {
-                    await rawClient.writeCommand(withDestination(p, outgoingDestination));
-                  } catch {
-                    break;
-                  }
-                }
-              })();
-            }
+          if (
+            Object.keys(mirrorClean).length > 0 &&
+            blePacketsFromAtemPanelSyncClean(mirrorClean).length > 0
+          ) {
+            enqueueAtemPanelSyncMirrorBle(mirrorClean);
           }
         }
       },
@@ -1467,6 +1786,10 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       },
     });
     await relayHostBridge.connect(sessionName, deviceId, options?.atemCcu);
+    if (options?.atemCcu) {
+      enableAtemMixerDebugDefaults();
+      log("ATEM CCU: compact debug trace on — watch for [ccu h] lines in this log.");
+    }
     relayHostBridge.pushPanelSync(buildRelayPanelSyncEnvelope());
     syncRelayHubButtons();
     void banksApi.saveLastState(deviceId, currentScene).catch((e: unknown) => {
@@ -1484,10 +1807,69 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       log("WebSocket is not available in this browser.");
       return false;
     }
-    if (relayHostBridge?.isAtemCcuHost && relayHostBridge.isActive) return true;
 
-    const prefs = relayPrefsForModal(ATEM_CCU_RELAY_DEVICE_ID);
-    const sessionName = prefs.sessionName.trim() || "ATEM CCU";
+    const banksPersist = atemBanksPersistDeviceId();
+    const br = relayHostBridge;
+
+    const hostDeviceId =
+      bleLinked && activeDeviceId && activeDeviceId !== ATEM_CCU_RELAY_DEVICE_ID
+        ? activeDeviceId
+        : ATEM_CCU_RELAY_DEVICE_ID;
+
+    if (br?.isActive && !br.isAtemCcuHost && bleLinked) {
+      const sessionName = effectiveAtemRelaySessionName().trim() || "ATEM CCU";
+      writeRelayPrefs(ATEM_CCU_RELAY_DEVICE_ID, {
+        sessionName,
+        share: true,
+        atemCcu: true,
+        atemAddress: trimmed,
+        atemCameraId: cameraId,
+      });
+      if (activeDeviceId && activeDeviceId !== ATEM_CCU_RELAY_DEVICE_ID) {
+        const cp = readRelayPrefs(activeDeviceId) ?? {};
+        writeRelayPrefs(activeDeviceId, {
+          ...cp,
+          sessionName,
+          share: true,
+          atemCcu: true,
+          atemAddress: trimmed,
+          atemCameraId: cameraId,
+        });
+      }
+      writeAtemLanPersistIntent(true);
+      atemLanResumeInFlight = true;
+      syncAtemLanConnectUi?.();
+      try {
+        br.attachAtemCcu({ address: trimmed, cameraId });
+        await loadBanksFor(banksPersist);
+        void banksApi
+          .saveAtemCcuRelay(banksPersist, { address: trimmed, cameraId, sessionName })
+          .catch((err: unknown) => log(`ATEM relay prefs save failed: ${errorMessage(err)}`));
+        refreshControls();
+        log(
+          `ATEM CCU: switcher linked on hosted relay "${sessionName}" (local Bluetooth) → ${trimmed} (camera ${cameraId})`,
+        );
+        const ok = !!relayHostBridge?.isAtemCcuHost;
+        if (ok) {
+          enableAtemMixerDebugDefaults();
+          log("ATEM CCU: compact debug trace on — watch for [ccu h] lines in this log.");
+          clearAtemLanReconnectSchedule();
+          atemLanReconnectAttempts = 0;
+        }
+        return ok;
+      } catch (e: unknown) {
+        log(`ATEM attach failed: ${errorMessage(e)}`);
+        return false;
+      } finally {
+        atemLanResumeInFlight = false;
+        syncAtemLanConnectUi?.();
+      }
+    }
+
+    forceResetAtemLanRelayConnector();
+
+    const sessionName = relaySessionNameForAtemLanHost(hostDeviceId);
+
     writeRelayPrefs(ATEM_CCU_RELAY_DEVICE_ID, {
       sessionName,
       share: true,
@@ -1495,20 +1877,31 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       atemAddress: trimmed,
       atemCameraId: cameraId,
     });
+    if (hostDeviceId !== ATEM_CCU_RELAY_DEVICE_ID) {
+      const cp = readRelayPrefs(hostDeviceId) ?? {};
+      writeRelayPrefs(hostDeviceId, {
+        ...cp,
+        sessionName,
+        share: true,
+        atemCcu: true,
+        atemAddress: trimmed,
+        atemCameraId: cameraId,
+      });
+    }
     writeAtemLanPersistIntent(true);
 
     atemLanResumeInFlight = true;
     syncAtemLanConnectUi?.();
     try {
-      await startRelayHosting(sessionName, ATEM_CCU_RELAY_DEVICE_ID, {
+      await startRelayHosting(sessionName, hostDeviceId, {
         atemCcu: { address: trimmed, cameraId },
       });
-      await loadBanksFor(ATEM_CCU_RELAY_DEVICE_ID);
+      await loadBanksFor(hostDeviceId);
       void banksApi
-        .saveAtemCcuRelay(ATEM_CCU_RELAY_DEVICE_ID, { address: trimmed, cameraId, sessionName })
+        .saveAtemCcuRelay(hostDeviceId, { address: trimmed, cameraId, sessionName })
         .catch((err: unknown) => log(`ATEM relay prefs save failed: ${errorMessage(err)}`));
       refreshControls();
-      log(`ATEM CCU: hosting "${sessionName}" → ${trimmed} (camera ${cameraId})`);
+      log(`ATEM CCU: relay session "${sessionName}" → ${trimmed} (camera ${cameraId})`);
       const ok = !!relayHostBridge?.isAtemCcuHost;
       if (ok) {
         clearAtemLanReconnectSchedule();
@@ -1582,8 +1975,6 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
 
   function stopAtemRelayHosting(): void {
     writeAtemLanPersistIntent(false);
-    clearAtemLanReconnectSchedule();
-    atemLanReconnectAttempts = 0;
     const prefs = relayPrefsForModal(ATEM_CCU_RELAY_DEVICE_ID);
     writeRelayPrefs(ATEM_CCU_RELAY_DEVICE_ID, {
       sessionName: prefs.sessionName,
@@ -1592,11 +1983,25 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       atemAddress: prefs.atemAddress,
       atemCameraId: prefs.atemCameraId,
     });
-    if (relayHostBridge) {
-      clearRelayHostPanelSyncDebouncer();
-      relayHostBridge.stopSharing();
-      relayHostBridge = undefined;
+    if (
+      bleLinked &&
+      relayHostBridge?.isActive &&
+      relayHostBridge.isAtemCcuHost &&
+      !relayHostBridge.exclusiveAtemRelayHost
+    ) {
+      relayHostBridge.detachAtemCcu();
+      if (activeDeviceId && activeDeviceId !== ATEM_CCU_RELAY_DEVICE_ID) {
+        const cp = readRelayPrefs(activeDeviceId);
+        if (cp) {
+          writeRelayPrefs(activeDeviceId, { ...cp, atemCcu: false });
+        }
+      }
+      refreshControls();
+      syncAtemLanConnectUi?.();
+      log("ATEM CCU: detached from relay session (Bluetooth share continues)");
+      return;
     }
+    forceResetAtemLanRelayConnector("ATEM CCU: disconnected — connector reset.");
     refreshControls();
     syncAtemLanConnectUi?.();
   }
@@ -1625,12 +2030,21 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     const p = relayPrefsForModal(ATEM_CCU_RELAY_DEVICE_ID);
     const addrPrefs = readRelayPrefs(atemLanPrefsDeviceKey(addr));
     const addrChanged = p.atemAddress.trim().toLowerCase() !== addr.toLowerCase();
+    const fromBle =
+      bleLinked &&
+      activeDeviceId &&
+      activeDeviceId !== ATEM_CCU_RELAY_DEVICE_ID &&
+      state.current.cameraNumber !== undefined &&
+      Number.isFinite(state.current.cameraNumber)
+        ? atemCameraIdFromBleBody(state.current.cameraNumber)
+        : undefined;
     const camHint =
-      addrPrefs?.atemCameraId !== undefined
+      fromBle ??
+      (addrPrefs?.atemCameraId !== undefined
         ? clampAtemCameraId(addrPrefs.atemCameraId)
         : clampAtemCameraId(
             (addrChanged ? state.current.cameraNumber : p.atemCameraId) ?? p.atemCameraId ?? 1,
-          );
+          ));
     writeRelayPrefs(ATEM_CCU_RELAY_DEVICE_ID, { ...p, atemAddress: addr, atemCameraId: camHint });
     if (camEl && !relayHostBridge?.isAtemCcuHost) {
       camEl.value = String(camHint);
@@ -1754,7 +2168,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
           return;
         }
 
-        const banksDeviceId = useAtem ? ATEM_CCU_RELAY_DEVICE_ID : deviceId;
+        const banksDeviceId = deviceId;
         const prefsPayload: RelayStoredPrefs = {
           sessionName: name,
           share,
@@ -1764,6 +2178,15 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
         };
         if (name) writeRelayPrefs(banksDeviceId, prefsPayload);
         else writeRelayPrefs(banksDeviceId, { sessionName: "", share: false });
+        if (useAtem && addr && deviceId !== ATEM_CCU_RELAY_DEVICE_ID) {
+          writeRelayPrefs(ATEM_CCU_RELAY_DEVICE_ID, {
+            sessionName: name,
+            share: true,
+            atemCcu: true,
+            atemAddress: addr,
+            atemCameraId: camId,
+          });
+        }
 
         close();
         void (async () => {
@@ -1850,6 +2273,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       relayHostBridge?.stopSharing();
       relayHostBridge = undefined;
       clearRelayHostPanelSyncDebouncer();
+      resetAtemBleMirrorBleQueue();
       if (deviceId) {
         const prefs = readRelayPrefs(deviceId);
         if (prefs?.sessionName) {
@@ -1912,6 +2336,18 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   let prevSnapshot: CameraSnapshot | null = null;
   let prevDirty = false;
   state.subscribe((snapshot) => {
+    if (bleLinked && !relayJoinedMode) {
+      const n = snapshot.cameraNumber;
+      if (
+        n !== undefined &&
+        Number.isFinite(n) &&
+        (prevSnapshot === null || n !== prevSnapshot.cameraNumber)
+      ) {
+        const nt = Math.trunc(n);
+        setOutgoingDestination(nt);
+        pushBleBodyCameraIdToAtemMixerFilter(nt);
+      }
+    }
     updatePanel(root, snapshot, { localBleGattConnected: bleLinked && !relayJoinedMode });
     pulseChangedControls(root, prevSnapshot, snapshot);
     prevSnapshot = snapshot;
@@ -1928,7 +2364,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   bind(root, "[data-native-ble-found-list]", "click", async (ev) => {
     const tgt = ev.target as HTMLElement | null;
     const btn = tgt?.closest?.<HTMLButtonElement>("button[data-ble-device-id]");
-    if (!btn?.dataset.bleDeviceId || bleLinked || relayJoinedMode || relayHostBridge?.isAtemCcuHost)
+    if (!btn?.dataset.bleDeviceId || bleLinked || relayJoinedMode)
       return;
     if (!(rawClient instanceof NativeBleCameraClient)) return;
     const hint = btn.dataset.bleDeviceLabel?.trim();
@@ -1959,8 +2395,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   });
 
   bind(root, "[data-connect-toggle]", "click", async () => {
-    const live = bleLinked || relayJoinedMode || !!relayHostBridge?.isAtemCcuHost;
-    if (live) {
+    if (bleLinked || relayJoinedMode) {
       client.disconnect();
       log("Disconnect requested");
       return;
@@ -1991,7 +2426,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   });
 
   bind(root, "[data-last-ble-reconnect]", "click", async () => {
-    if (bleLinked || relayJoinedMode || relayHostBridge?.isAtemCcuHost) return;
+    if (bleLinked || relayJoinedMode) return;
     if (!(rawClient instanceof NativeBleCameraClient)) return;
     const snap = readLastNativeBleSnapshot();
     if (!snap?.peripheralId) return;
@@ -2145,7 +2580,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   });
 
   bindStepper(root, "gain", async (direction) => {
-    const next = stepGainDb(state.current.gainDb ?? 0, direction);
+    const next = stepMasterGainDb(state.current.gainDb ?? 0, direction, state.current.deviceName);
     state.applyGainDbWrite(next);
     await sendCommand(log, `Gain ${next > 0 ? "+" : ""}${next}dB`, commands.gain(next));
   });
@@ -2259,11 +2694,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     button.addEventListener("click", async () => {
       const id = Number(button.dataset.cameraId ?? "1");
       state.setCameraNumber(id);
-      setOutgoingDestination(id);
       state.applyMetadataWrite({ cameraId: String(id) });
-      const p = relayPrefsForModal(ATEM_CCU_RELAY_DEVICE_ID);
-      writeRelayPrefs(ATEM_CCU_RELAY_DEVICE_ID, { ...p, atemCameraId: clampAtemCameraId(id) });
-      syncAtemLanConnectUi?.();
       await sendCommand(log, `Camera ${id} (dest + slate ID)`, commands.metadataCameraId(String(id)));
       if (relayHostBridge?.isActive) scheduleRelayHostPanelSync();
     });
@@ -2275,11 +2706,53 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
 
   const atemPanelSyncDebugInput = root.querySelector<HTMLInputElement>("[data-debug-atem-sync]");
   if (atemPanelSyncDebugInput) {
-    atemPanelSyncDebugInput.checked = localStorage.getItem(ATEM_PANEL_SYNC_DEBUG_LS) === "1";
+    syncAtemCompactTraceCheckboxFromStorage();
     atemPanelSyncDebugInput.addEventListener("change", () => {
-      if (atemPanelSyncDebugInput.checked) localStorage.setItem(ATEM_PANEL_SYNC_DEBUG_LS, "1");
-      else localStorage.removeItem(ATEM_PANEL_SYNC_DEBUG_LS);
-      log(`ATEM CCU debug log ${atemPanelSyncDebugInput.checked ? "on (compact; set bm-debug-atem-ccu-json for full JSON)" : "off"}`);
+      try {
+        if (atemPanelSyncDebugInput.checked) localStorage.setItem(ATEM_PANEL_SYNC_DEBUG_LS, "1");
+        else localStorage.setItem(ATEM_PANEL_SYNC_DEBUG_LS, "0");
+      } catch {
+        /* ignore */
+      }
+      log(`ATEM CCU compact trace ${atemPanelSyncDebugInput.checked ? "on" : "off"}`);
+    });
+  }
+
+  const atemCcuJsonDebugInput = root.querySelector<HTMLInputElement>("[data-debug-atem-ccu-json]");
+  if (atemCcuJsonDebugInput) {
+    try {
+      atemCcuJsonDebugInput.checked = localStorage.getItem(ATEM_CCU_TRACE_JSON_LS) === "1";
+    } catch {
+      atemCcuJsonDebugInput.checked = false;
+    }
+    atemCcuJsonDebugInput.addEventListener("change", () => {
+      try {
+        if (atemCcuJsonDebugInput.checked) localStorage.setItem(ATEM_CCU_TRACE_JSON_LS, "1");
+        else localStorage.removeItem(ATEM_CCU_TRACE_JSON_LS);
+      } catch {
+        /* ignore */
+      }
+      log(`ATEM CCU full JSON ${atemCcuJsonDebugInput.checked ? "on" : "off"}`);
+    });
+  }
+
+  const relayLocalhostDebugInput = root.querySelector<HTMLInputElement>("[data-debug-relay-localhost]");
+  if (relayLocalhostDebugInput) {
+    try {
+      relayLocalhostDebugInput.checked = localStorage.getItem(DEBUG_RELAY_HUB_LOCALHOST_LS) === "1";
+    } catch {
+      relayLocalhostDebugInput.checked = false;
+    }
+    relayLocalhostDebugInput.addEventListener("change", () => {
+      try {
+        if (relayLocalhostDebugInput.checked) localStorage.setItem(DEBUG_RELAY_HUB_LOCALHOST_LS, "1");
+        else localStorage.removeItem(DEBUG_RELAY_HUB_LOCALHOST_LS);
+      } catch {
+        /* ignore */
+      }
+      log(
+        `Relay hub override (localhost:5173) ${relayLocalhostDebugInput.checked ? "on" : "off"} — next Join/Share uses ${getRelaySocketUrl()}`,
+      );
     });
   }
 
@@ -2585,7 +3058,7 @@ function bindIrisJoystick(
   const handle = root.querySelector<HTMLElement>("[data-iris-joystick-handle]");
   if (!joystick || !handle) return;
 
-  const minSendIntervalMs = 60;
+  const minSendIntervalMs = BLE_POINTER_DRAG_SEND_INTERVAL_MS;
   const verticalRangePx = (): number => irisTbarDragRangePx(joystick, handle);
 
   let dragging = false;
@@ -3117,7 +3590,7 @@ function bindPaintKnobs(
   const SENSITIVITY_DEG = 270;
   /** Pointer travel (px) for mouse/pen: drag this distance vertically to sweep the full parameter range. */
   const VERTICAL_DRAG_PX_FOR_FULL_SPAN = 180;
-  const minSendIntervalMs = 60;
+  const minSendIntervalMs = BLE_POINTER_DRAG_SEND_INTERVAL_MS;
 
   root.querySelectorAll<HTMLElement>("[data-paint-cell]").forEach((cell) => {
     const group = cell.dataset.group as PaintGroup | undefined;
@@ -3250,7 +3723,7 @@ function bindHFader(
   const handle = fader?.querySelector<HTMLElement>("[data-h-fader-handle]");
   if (!fader || !handle) return;
 
-  const minSendIntervalMs = 60;
+  const minSendIntervalMs = BLE_POINTER_DRAG_SEND_INTERVAL_MS;
 
   let dragging = false;
   let pointerId: number | null = null;
@@ -3337,7 +3810,7 @@ function bindMiniFader(
   const cell = fader.closest<HTMLElement>(".audio-fader-cell");
   const readout = cell?.querySelector<HTMLElement>("[data-readout]");
 
-  const minSendIntervalMs = 60;
+  const minSendIntervalMs = BLE_POINTER_DRAG_SEND_INTERVAL_MS;
 
   let dragging = false;
   let pointerId: number | null = null;
@@ -3427,11 +3900,6 @@ function bindStepper(
 
   upButton?.addEventListener("click", () => void handler(1));
   downButton?.addEventListener("click", () => void handler(-1));
-}
-
-function stepGainDb(current: number, direction: StepDirection): number {
-  const next = Math.round(current + direction);
-  return clampNumber(next, MASTER_GAIN_RANGE.min, MASTER_GAIN_RANGE.max);
 }
 
 const ISO_LADDER = [100, 125, 160, 200, 250, 320, 400, 500, 640, 800, 1000, 1250, 1600, 2000, 2500, 3200, 4000, 5000, 6400, 8000, 12800, 25600];
@@ -3562,7 +4030,7 @@ function bindVerticalFader(
   opts: FaderBindingOptions,
 ): void {
   const range = readFaderRange(fader);
-  const minSendIntervalMs = 60;
+  const minSendIntervalMs = BLE_POINTER_DRAG_SEND_INTERVAL_MS;
 
   let dragging = false;
   let pointerId: number | null = null;
@@ -3647,7 +4115,7 @@ function bindHorizontalFader(
   if (!fader || !handle) return;
 
   const range = readFaderRange(fader);
-  const minSendIntervalMs = 60;
+  const minSendIntervalMs = BLE_POINTER_DRAG_SEND_INTERVAL_MS;
 
   let dragging = false;
   let pointerId: number | null = null;

@@ -20,28 +20,29 @@ import {
   ccuAudioTallyToSnapshotPatch,
   type CcuAudioTallyBucket,
 } from "./ccuAudioTallyApply.js";
+import { extractCcuGainDbUpdate } from "./ccuVideoGainApply.js";
 import { extractCcuIsoUpdate } from "./ccuVideoIsoApply.js";
 import { atemWireCommandsTraceExtras } from "./atemWireCommandsTrace.js";
+import { logRawReceivedCommands, rawReceivedCommandLines } from "./logRawReceivedCommands.js";
 import { readTallyBySourceForCamera, type MixerTallyLeds } from "./mixerTallyFromAtemCommands.js";
 
-/** When false, send every panel_sync even if payload matches last (except trace ts). Default on. */
+/** When false, send every panel_sync even if payload matches last. Default on. */
 function atemPanelSyncDedupeEnabled(): boolean {
   const v = process.env.ATEM_CCU_PANEL_SYNC_DEDUPE ?? "1";
   return v !== "0" && String(v).toLowerCase() !== "false";
 }
 
-/** Stable fingerprint for dedupe: same as wire JSON but ignore trace `ts` (ATEM echoes often). */
+/** Dedupe fingerprint: merged panel fields plus trace **without** `ts` so CCU-only deltas still emit when `rest` is unchanged. */
 function panelSyncDedupeFingerprint(snapshot: Record<string, unknown>): string {
   const traceKey = ATEM_CCU_TRACE_SNAPSHOT_KEY;
   const rawTrace = snapshot[traceKey];
-  if (rawTrace && typeof rawTrace === "object" && !Array.isArray(rawTrace)) {
-    const r = rawTrace as Record<string, unknown>;
-    if ("ts" in r) {
-      const { ts: _ts, ...rest } = r;
-      return JSON.stringify({ ...snapshot, [traceKey]: rest });
-    }
+  const { [traceKey]: _trace, ...rest } = snapshot;
+  let traceNoTs: unknown = null;
+  if (rawTrace && typeof rawTrace === "object") {
+    const { ts: _ts, ...trest } = rawTrace as Record<string, unknown>;
+    traceNoTs = trest;
   }
-  return JSON.stringify(snapshot);
+  return JSON.stringify({ rest, trace: traceNoTs });
 }
 
 function hexToBytes(hex: string): Uint8Array {
@@ -57,6 +58,55 @@ function hexToBytes(hex: string): Uint8Array {
 function atemCcuDebugEnabled(): boolean {
   const v = process.env.ATEM_CCU_DEBUG ?? "";
   return v === "1" || v.toLowerCase() === "true";
+}
+
+/** Log each incoming switcher command batch while TCP is up (default on). Set `ATEM_CCU_LOG_MIXER_RX=0` to disable. */
+function atemCcuLogMixerRxEnabled(): boolean {
+  const v = process.env.ATEM_CCU_LOG_MIXER_RX ?? "1";
+  return v !== "0" && String(v).toLowerCase() !== "false";
+}
+
+/** When true, attach `atemRaw: string[]` (`[atem-raw] …` per command) to relay `__atemCcuTrace` for the app debug log. Default on; set `ATEM_CCU_RELAY_RAW_TO_TRACE=0` to disable. */
+function atemCcuRelayRawToTraceEnabled(): boolean {
+  const v = process.env.ATEM_CCU_RELAY_RAW_TO_TRACE ?? "1";
+  return v !== "0" && String(v).toLowerCase() !== "false";
+}
+
+/** Max commands serialized into `atemRaw` per batch; `0` = no limit. Default 128. */
+function atemCcuRelayRawMaxCommands(): number {
+  const n = Number(process.env.ATEM_CCU_RELAY_RAW_MAX ?? "");
+  if (n === 0) return Number.POSITIVE_INFINITY;
+  if (Number.isFinite(n) && n > 0) return Math.min(512, Math.floor(n));
+  return 128;
+}
+
+function isIgnoredHighFrequencyRelayRawCommand(cmd: unknown): boolean {
+  if (typeof cmd !== "object" || cmd === null) return false;
+  const ctor = (cmd as { constructor?: { name?: string; rawName?: string } }).constructor;
+  return ctor?.name === "TimeCommand" || ctor?.rawName === "Time";
+}
+
+function appendAtemRawToTrace(
+  trace: Record<string, unknown>,
+  commands: unknown[],
+  batchTs: string,
+): Record<string, unknown> {
+  if (!atemCcuRelayRawToTraceEnabled()) return trace;
+  const cap = atemCcuRelayRawMaxCommands();
+  const slice = Number.isFinite(cap) && cap < commands.length ? commands.slice(0, cap) : commands;
+  const lines = rawReceivedCommandLines(slice, batchTs);
+  if (commands.length > slice.length) {
+    lines.push(
+      `[atem-raw] ${JSON.stringify({
+        ts: batchTs,
+        note: "relay_raw_truncated",
+        totalCommands: commands.length,
+        included: slice.length,
+      })}`,
+    );
+  }
+  if (lines.length === 0) return trace;
+  return { ...trace, atemRaw: lines };
 }
 
 /** When false, omit `__atemCcuTrace` from relay panel_sync (smaller payloads). Default on – matches npm run atem:ccu-watch shape for app Debug log. */
@@ -103,6 +153,10 @@ export type AtemCcuRoomBridgeCallbacks = {
   hostSocket: () => WsType | undefined;
   /** ATEM switcher TCP connected or dropped (for UI + Redis session metadata). */
   onAtemTcpLinkChange?: (linked: boolean) => void;
+  /** Shown in the host app log as `atem_ccu_error` (e.g. focused camera vs CC source mismatch). */
+  notifyHost?: (message: string) => void;
+  /** Hub → host browser debug log (`atem_ccu_log` wire), e.g. `[atem-raw]` lines. */
+  onHostLog?: (message: string) => void;
 };
 
 /**
@@ -125,6 +179,8 @@ export class AtemCcuRoomBridge {
   private readonly auxBuckets = new Map<number, CcuAudioTallyBucket>();
   /** Video ISO from CC (param 14); builder does not apply it. */
   private ccuIso: number | undefined;
+  /** Video sensor gain dB from CC (param 13 / legacy 1); builder only accepts param 13 as SINT8. */
+  private ccuGainDb: number | undefined;
   /** Latest PGM/PVW from {@link Commands.TallyBySourceCommand} for the focused camera input. */
   private mixerTallyLeds: MixerTallyLeds | undefined;
 
@@ -143,12 +199,24 @@ export class AtemCcuRoomBridge {
     this.callbacks = callbacks;
   }
 
+  private emitHostLog(message: string): void {
+    try {
+      this.callbacks.onHostLog?.(message);
+    } catch {
+      /* ignore */
+    }
+  }
+
   /** True when ATEM TCP session is up. */
   get isTcpLinked(): boolean {
     return this.tcpLinked;
   }
 
-  private emitMergedPanelSync(st: AtemCameraControlState | undefined, trace?: Record<string, unknown>): void {
+  private emitMergedPanelSync(
+    st: AtemCameraControlState | undefined,
+    trace?: Record<string, unknown>,
+    opts?: { bypassDedupe?: boolean },
+  ): void {
     const base: Record<string, unknown> = st
       ? { ...atemCameraControlStateToSnapshotPatch(st) }
       : { deviceName: `ATEM CCU (cam ${this.cameraId})` };
@@ -167,10 +235,13 @@ export class AtemCcuRoomBridge {
       };
     }
     if (this.ccuIso !== undefined) base.iso = this.ccuIso;
+    if (this.ccuGainDb !== undefined) base.gainDb = this.ccuGainDb;
     if (atemCcPanelSyncTraceWire() && trace) base[ATEM_CCU_TRACE_SNAPSHOT_KEY] = trace;
     if (atemPanelSyncDedupeEnabled()) {
       const fp = panelSyncDedupeFingerprint(base);
-      if (fp === this.lastPanelSyncDedupeFingerprint) return;
+      if (!opts?.bypassDedupe && fp === this.lastPanelSyncDedupeFingerprint) {
+        return;
+      }
       this.lastPanelSyncDedupeFingerprint = fp;
     }
     if (atemCcuDebugEnabled()) {
@@ -180,6 +251,8 @@ export class AtemCcuRoomBridge {
       } catch {
         /* ignore */
       }
+    } else if (process.env.ATEM_CCU_PANEL_SYNC_EMIT === "1") {
+      console.log("[atem-ccu] panel_sync emit keys:", Object.keys(base).sort().join(", "));
     }
     this.callbacks.emitPanelSync(base);
   }
@@ -260,6 +333,16 @@ export class AtemCcuRoomBridge {
     const atem = new Atem({});
     const sender = new AtemCameraControlDirectCommandSender(atem);
 
+    atem.on("connected", () => {
+      this.emitHostLog(
+        "ATEM hub: switcher session up — mixer lines appear when TCP batches parse to commands; `[atem-raw]` batches log below when hub RX logging is on.",
+      );
+    });
+    atem.on("debug", (msg: string) => {
+      if (!atemCcuLogMixerRxEnabled()) return;
+      this.emitHostLog(`[atem-debug] ${msg}`);
+    });
+
     atem.on("error", (msg) => {
       const host = this.callbacks.hostSocket();
       if (host?.readyState === 1) {
@@ -273,32 +356,38 @@ export class AtemCcuRoomBridge {
 
     atem.on("disconnected", () => {
       if (this.disposed) return;
+      /** False when {@link destroyLiveAtemInstance} already cleared `this.atem` — do not schedule reconnect. */
+      const stillCurrent = this.atem === atem;
       const was = this.tcpLinked;
       this.tcpLinked = false;
       builder.reset(this.inputs);
       this.auxBuckets.clear();
       this.ccuIso = undefined;
+      this.ccuGainDb = undefined;
       this.mixerTallyLeds = undefined;
       this.lastPanelSyncDedupeFingerprint = undefined;
       if (was) this.callbacks.onAtemTcpLinkChange?.(false);
       void (async () => {
         if (this.disposed) return;
-        if (this.atem === atem) await this.destroyLiveAtemInstance();
+        if (stillCurrent) await this.destroyLiveAtemInstance();
         else await atem.destroy().catch(() => {});
-        if (!this.disposed) this.scheduleTcpReconnect();
+        if (!this.disposed && stillCurrent) this.scheduleTcpReconnect();
       })();
     });
 
     atem.on("receivedCommands", (commands) => {
-      const debug = atemCcuDebugEnabled();
-      if (debug) {
-        const names = commands.map((c) => (c as { constructor?: { name?: string } }).constructor?.name ?? typeof c);
-        console.log(`[atem-ccu] receivedCommands count=${commands.length}`, names);
-      }
+      const verbose = atemCcuDebugEnabled();
+      const batchTs = new Date().toISOString();
+      const logRx = atemCcuLogMixerRxEnabled();
+      const relayRawCommands = commands.filter((cmd) => !isIgnoredHighFrequencyRelayRawCommand(cmd));
+      if (logRx) logRawReceivedCommands(relayRawCommands, batchTs, (line) => this.emitHostLog(line));
       const wireExtras = atemWireCommandsTraceExtras(commands);
       const hasWire = Object.keys(wireExtras).length > 0;
+      const hasRawBatch = atemCcuRelayRawToTraceEnabled() && relayRawCommands.length > 0;
       const mergeWire = (t: Record<string, unknown>): Record<string, unknown> =>
         hasWire ? { ...t, ...wireExtras } : t;
+      const withRaw = (t: Record<string, unknown>): Record<string, unknown> =>
+        appendAtemRawToTrace(t, relayRawCommands, batchTs);
 
       /** Runs after `atem-connection` applies this batch to `atem.state` (see {@link reconcileMixerTallyLedsWithAtemState}). */
       setImmediate(() => this.reconcileMixerTallyLedsWithAtemState(atem));
@@ -315,15 +404,22 @@ export class AtemCcuRoomBridge {
 
       const cc = collectCameraControlUpdates(commands);
       if (cc.length === 0) {
-        if (!mixerTallyChanged && (!hasWire || !atemCcPanelSyncTraceWire())) return;
+        if (
+          !mixerTallyChanged &&
+          (!hasWire || !atemCcPanelSyncTraceWire()) &&
+          !(hasRawBatch && atemCcPanelSyncTraceWire())
+        )
+          return;
         const st = builder.get(this.cameraId);
-        const traceWireOnly = mergeWire({
-          ts: new Date().toISOString(),
-          cameraId: this.cameraId,
-          note: "atem_wire",
-          ...(st ? { lensVideo: lensVideoSummary(st) } : {}),
-          ...atemCcuWatchRowAudioTallyExtras(this.auxBuckets.get(this.cameraId)),
-        });
+        const traceWireOnly = withRaw(
+          mergeWire({
+            ts: batchTs,
+            cameraId: this.cameraId,
+            note: "atem_wire",
+            ...(st ? { lensVideo: lensVideoSummary(st) } : {}),
+            ...atemCcuWatchRowAudioTallyExtras(this.auxBuckets.get(this.cameraId)),
+          }),
+        );
         this.emitMergedPanelSync(st ?? undefined, traceWireOnly);
         return;
       }
@@ -335,13 +431,12 @@ export class AtemCcuRoomBridge {
         this.ccuIso = isoNext;
         isoTouched = true;
       }
-      const deltas = builder.applyCommands(cc);
-      if (debug) {
-        console.log(
-          `[atem-ccu] CameraControlUpdateCommand=${cc.length} deltas=${deltas.length}`,
-          deltas.map((d) => ({ cameraId: d.cameraId })),
-        );
+      const gainNext = extractCcuGainDbUpdate(cc, this.cameraId);
+      const gainTouched = gainNext !== undefined;
+      if (gainTouched) {
+        this.ccuGainDb = gainNext;
       }
+      const deltas = builder.applyCommands(cc);
 
       let synced = false;
       for (const d of deltas) {
@@ -349,10 +444,12 @@ export class AtemCcuRoomBridge {
         if (d.cameraId !== this.cameraId) continue;
         const st = builder.get(this.cameraId);
         if (!st) continue;
-        const tracePayload = mergeWire({
-          ...ccuWatchStyleTrace(d as CcuDeltaPayload, st),
-          ...atemCcuWatchRowAudioTallyExtras(this.auxBuckets.get(this.cameraId)),
-        });
+        const tracePayload = withRaw(
+          mergeWire({
+            ...ccuWatchStyleTrace(d as CcuDeltaPayload, st),
+            ...atemCcuWatchRowAudioTallyExtras(this.auxBuckets.get(this.cameraId)),
+          }),
+        );
         this.emitMergedPanelSync(st, tracePayload);
         synced = true;
       }
@@ -361,14 +458,16 @@ export class AtemCcuRoomBridge {
       if (!synced && targetsFocusedCamera) {
         const st = builder.get(this.cameraId);
         if (st) {
-          if (debug) console.log("[atem-ccu] emitPanelSync fallback (commands targeted camera, no delta row)");
-          const fbTrace = mergeWire({
-            ts: new Date().toISOString(),
-            cameraId: this.cameraId,
-            note: "fallback_no_delta_row",
-            lensVideo: lensVideoSummary(st),
-            ...atemCcuWatchRowAudioTallyExtras(this.auxBuckets.get(this.cameraId)),
-          });
+          if (verbose) console.log("[atem-ccu] emitPanelSync fallback (commands targeted camera, no delta row)");
+          const fbTrace = withRaw(
+            mergeWire({
+              ts: batchTs,
+              cameraId: this.cameraId,
+              note: "fallback_no_delta_row",
+              lensVideo: lensVideoSummary(st),
+              ...atemCcuWatchRowAudioTallyExtras(this.auxBuckets.get(this.cameraId)),
+            }),
+          );
           this.emitMergedPanelSync(st, fbTrace);
           synced = true;
         }
@@ -378,13 +477,15 @@ export class AtemCcuRoomBridge {
         const audioSrc = pickPrimaryCcuSourceForTrace(auxTouched, this.cameraId);
         const st = builder.get(this.cameraId);
         const traceAux = atemCcPanelSyncTraceWire()
-          ? mergeWire({
-              ts: new Date().toISOString(),
-              cameraId: audioSrc,
-              note: "audio_tally_ccu",
-              ...(st ? { lensVideo: lensVideoSummary(st) } : {}),
-              ...atemCcuWatchRowAudioTallyExtras(this.auxBuckets.get(audioSrc)),
-            })
+          ? withRaw(
+              mergeWire({
+                ts: batchTs,
+                cameraId: audioSrc,
+                note: "audio_tally_ccu",
+                ...(st ? { lensVideo: lensVideoSummary(st) } : {}),
+                ...atemCcuWatchRowAudioTallyExtras(this.auxBuckets.get(audioSrc)),
+              }),
+            )
           : undefined;
         this.emitMergedPanelSync(st ?? undefined, traceAux);
         synced = true;
@@ -393,16 +494,36 @@ export class AtemCcuRoomBridge {
       if (!synced && isoTouched) {
         const st = builder.get(this.cameraId);
         const traceIso = atemCcPanelSyncTraceWire()
-          ? mergeWire({
-              ts: new Date().toISOString(),
-              cameraId: this.cameraId,
-              note: "iso_ccu",
-              iso: this.ccuIso,
-              ...(st ? { lensVideo: lensVideoSummary(st) } : {}),
-              ...atemCcuWatchRowAudioTallyExtras(this.auxBuckets.get(this.cameraId)),
-            })
+          ? withRaw(
+              mergeWire({
+                ts: batchTs,
+                cameraId: this.cameraId,
+                note: "iso_ccu",
+                iso: this.ccuIso,
+                ...(st ? { lensVideo: lensVideoSummary(st) } : {}),
+                ...atemCcuWatchRowAudioTallyExtras(this.auxBuckets.get(this.cameraId)),
+              }),
+            )
           : undefined;
         this.emitMergedPanelSync(st ?? undefined, traceIso);
+        synced = true;
+      }
+
+      if (!synced && gainTouched) {
+        const st = builder.get(this.cameraId);
+        const traceGain = atemCcPanelSyncTraceWire()
+          ? withRaw(
+              mergeWire({
+                ts: batchTs,
+                cameraId: this.cameraId,
+                note: "gain_ccu",
+                gainDb: this.ccuGainDb,
+                ...(st ? { lensVideo: lensVideoSummary(st) } : {}),
+                ...atemCcuWatchRowAudioTallyExtras(this.auxBuckets.get(this.cameraId)),
+              }),
+            )
+          : undefined;
+        this.emitMergedPanelSync(st ?? undefined, traceGain);
         synced = true;
       }
 
@@ -412,24 +533,27 @@ export class AtemCcuRoomBridge {
           this.lastCameraMismatchLogMs = now;
           const deltaIds = [...new Set(deltas.map((d) => d.cameraId))].sort((a, b) => a - b);
           const cmdSources = [...new Set(cc.map((c) => c.source))].sort((a, b) => a - b);
-          console.warn(
-            `[atem-ccu] CC updates received but none applied for focused camera ${this.cameraId}. ` +
-              `Command sources: [${cmdSources.join(", ")}]. Delta camera ids: [${deltaIds.join(", ")}]. ` +
-              `Pick the Camera number that matches CC “source” in npm run atem:ccu-watch.`,
-          );
+          const msg =
+            `CC updates received but none applied for focused camera ${this.cameraId}. ` +
+            `Command sources: [${cmdSources.join(", ")}]. Delta camera ids: [${deltaIds.join(", ")}]. ` +
+            `Pick the Camera index that matches CC “source” (see npm run atem:ccu-watch).`;
+          console.warn(`[atem-ccu] ${msg}`);
+          this.callbacks.notifyHost?.(msg);
         }
       }
 
-      if (!synced && (mixerTallyChanged || (hasWire && atemCcPanelSyncTraceWire()))) {
+      if (!synced && (mixerTallyChanged || (hasWire && atemCcPanelSyncTraceWire()) || (hasRawBatch && atemCcPanelSyncTraceWire()))) {
         const audioSrc = pickPrimaryCcuSourceForTrace(auxTouched, this.cameraId);
         const st = builder.get(this.cameraId);
-        const traceWireTail = mergeWire({
-          ts: new Date().toISOString(),
-          cameraId: audioSrc,
-          note: mixerTallyChanged && !hasWire ? "mixer_tally" : "atem_wire",
-          ...(st ? { lensVideo: lensVideoSummary(st) } : {}),
-          ...atemCcuWatchRowAudioTallyExtras(this.auxBuckets.get(audioSrc)),
-        });
+        const traceWireTail = withRaw(
+          mergeWire({
+            ts: batchTs,
+            cameraId: audioSrc,
+            note: mixerTallyChanged && !hasWire ? "mixer_tally" : "atem_wire",
+            ...(st ? { lensVideo: lensVideoSummary(st) } : {}),
+            ...atemCcuWatchRowAudioTallyExtras(this.auxBuckets.get(audioSrc)),
+          }),
+        );
         this.emitMergedPanelSync(st ?? undefined, traceWireTail);
       }
     });
@@ -469,6 +593,22 @@ export class AtemCcuRoomBridge {
       this.emitMergedPanelSync(snap, initialTrace);
     }
 
+    /** Late CCdP batches can land after the first builder read; re-emit once so clients are not stuck on an empty builder row. */
+    setTimeout(() => {
+      if (this.disposed || this.atem !== atem || !this.tcpLinked) return;
+      const stLate = builder.get(this.cameraId);
+      const lateTrace = atemCcPanelSyncTraceWire()
+        ? {
+            ts: new Date().toISOString(),
+            cameraId: this.cameraId,
+            note: "post_connect_refresh",
+            ...(stLate ? { lensVideo: lensVideoSummary(stLate) } : {}),
+            ...atemCcuWatchRowAudioTallyExtras(this.auxBuckets.get(this.cameraId)),
+          }
+        : undefined;
+      this.emitMergedPanelSync(stLate ?? undefined, lateTrace, { bypassDedupe: true });
+    }, 450);
+
     const host = this.callbacks.hostSocket();
     if (host?.readyState === 1) {
       try {
@@ -504,6 +644,7 @@ export class AtemCcuRoomBridge {
     this.builder = undefined;
     this.auxBuckets.clear();
     this.ccuIso = undefined;
+    this.ccuGainDb = undefined;
     this.mixerTallyLeds = undefined;
     this.lastPanelSyncDedupeFingerprint = undefined;
     void a?.destroy();
