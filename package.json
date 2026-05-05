@@ -21,6 +21,7 @@
     "atem:send-video-gain": "tsx scripts/atem-send-video-gain.ts",
     "atem:ccu-watch:log": "bash scripts/atem-ccu-watch-log.sh",
     "atem:analyze-log": "tsx scripts/analyze-atem-log.ts",
+    "atem:edge-agent": "tsx scripts/atem-edge-agent.ts",
     "test:e2e:atem-ccu": "tsx scripts/e2e-atem-ccu-relay.ts",
     "typecheck": "tsc --noEmit",
     "postinstall": "patch-package"
