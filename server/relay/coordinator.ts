@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import type { IncomingMessage, Server as HttpServer } from "node:http";
 import type { Duplex } from "node:stream";
 import { URL } from "node:url";
@@ -35,7 +35,7 @@ export type RelayWireMessage =
   | { type: "status"; raw: number; payloadHex?: string }
   | { type: "incoming"; hex: string }
   | { type: "joined"; sessionName: string; deviceId: string }
-  | { type: "hosted"; sessionId: string }
+  | { type: "hosted"; sessionId: string; edgeToken?: string; atemPlaneSessionId?: string }
   | { type: "session_ended" }
   | { type: "host_power"; on: boolean }
   | { type: "host_pair" }
@@ -50,19 +50,96 @@ export type RelayWireMessage =
   | { type: "atem_ccu_log"; message: string }
   | {
       type: "host_atem_ccu_register";
+      /** Route CCU to a named LAN connector ({@link RelayCoordinator.listAtemConnectors}). */
+      connectorId?: string;
       atemCcu: { address: string; port?: number; cameraId: number; inputs?: number };
     }
-  | { type: "host_atem_ccu_stop" };
+  | { type: "host_atem_ccu_stop" }
+  | {
+      type: "joiner_atem_ccu_register";
+      connectorId?: string;
+      atemCcu: { address: string; port?: number; cameraId: number; inputs?: number };
+    }
+  | { type: "joiner_atem_ccu_stop" }
+  | { type: "atem_edge_register"; sessionId: string; token: string }
+  | { type: "atem_edge_ready"; sessionId: string }
+  | { type: "atem_edge_panel_sync"; sessionId: string; snapshot: Record<string, unknown> }
+  | { type: "atem_edge_link"; sessionId: string; connected: boolean; address?: string; cameraId?: number }
+  | {
+      type: "atem_edge_notify";
+      sessionId: string;
+      kind: "error" | "log";
+      message: string;
+    }
+  | { type: "atem_edge_forward_cmd"; hex: string }
+  | {
+      type: "atem_edge_control";
+      sessionId: string;
+      /** When set, send commands to this ATEM connector instead of the session/plane edge socket. */
+      connectorId?: string;
+      command: "connect" | "disconnect" | "restart";
+      atemCcu?: { address: string; port?: number; cameraId: number; inputs?: number };
+    }
+  | {
+      type: "atem_connector_register";
+      name: string;
+      connectorId?: string;
+      token?: string;
+    }
+  | { type: "atem_connector_ready"; connectorId: string; token: string; name: string }
+  | { type: "atem_connector_panel_sync"; connectorId: string; snapshot: Record<string, unknown> }
+  | {
+      type: "atem_connector_link";
+      connectorId: string;
+      connected: boolean;
+      address?: string;
+      cameraId?: number;
+    }
+  | { type: "atem_connector_notify"; connectorId: string; kind: "error" | "log"; message: string }
+  /** Hub → LAN edge (session context included for logs/routing clarity). */
+  | {
+      type: "atem_edge_control";
+      sessionId?: string;
+      command: "connect";
+      atemCcu: { address: string; port?: number; cameraId: number; inputs?: number };
+    }
+  | { type: "atem_edge_control"; sessionId?: string; command: "disconnect" | "restart" };
 
 type Room = {
   sessionId: string;
   sessionName: string;
   deviceId: string;
+  /** Reserved relay room for LAN ATEM edge (`RELAY_ATEM_PLANE_*`); never listed in Join UI. */
+  hiddenAtemPlane?: boolean;
   host?: WsType;
   clients: Set<WsType>;
   hostPingInterval?: ReturnType<typeof setInterval>;
   atemBridge?: AtemCcuRoomBridge;
+  /** Join socket that started hub ATEM for this room — dispose bridge when it disconnects. */
+  atemJoinerSocket?: WsType;
+  /** Hub ATEM started via {@link RelayCoordinator.attachJoinerAtemHttp} (banks API), not the join WebSocket. */
+  atemHttpAttached?: boolean;
+  /** Local-truck ATEM process attached over WS — TCP runs on edge, not this coordinator. */
+  atemEdgeSocket?: WsType;
+  /** Single-use token from {@link randomBytes}; host shares with edge agent to attach. */
+  edgeToken?: string;
+  /** TCP link state when ATEM is on edge (no in-process {@link AtemCcuRoomBridge}). */
+  edgeTcpLinked?: boolean;
 };
+
+/** LAN process that holds ATEM camera-control TCP and speaks {@link RelayWireMessage} on the relay socket. */
+type AtemConnector = {
+  id: string;
+  name: string;
+  token: string;
+  socket?: WsType;
+  tcpLinked?: boolean;
+  target?: { address: string; cameraId: number; port?: number };
+};
+
+function connectorNameKey(name: string): string {
+  return name.trim().toLowerCase();
+}
 
 type RedisPair = {
   pub: import("ioredis").default;
@@ -111,8 +188,206 @@ export class RelayCoordinator {
   private readonly wss: WebSocketServer;
   private readonly redisUrl: string | undefined;
   private redis?: RedisPair;
+  /** Per relay session id: number of ATEM attach intents for the global plane edge (host/joiner stops decrement). */
+  private readonly atemPlaneInterest = new Map<string, number>();
+  /** Named LAN ATEM bridges (register via `atem_connector_register`). */
+  private readonly atemConnectors = new Map<string, AtemConnector>();
+  /** Operator session id → connector id for CCU fan-out and `forward_cmd`. */
+  private readonly sessionAtemConnector = new Map<string, string>();
   /** When set, `ensureRedis` skips new attempts until the clock passes this (retry after transient failure / boot race). */
   private redisRetryNotBeforeMs = 0;
+
+  /** When false (set `RELAY_ATEM_HUB_BRIDGE=0` on cloud), coordinator does not open ATEM TCP — use `atem_edge_*` messages from a LAN agent. */
+  private hubAtemBridgeAllowed(): boolean {
+    const v = process.env.RELAY_ATEM_HUB_BRIDGE;
+    return v !== "0" && String(v ?? "").toLowerCase() !== "false";
+  }
+
+  /** Static ATEM control-plane room (edge WS + token); optional alternative to per-session {@link Room.edgeToken}. */
+  private getAtemPlaneConfig(): { sessionId: string; edgeToken: string } | undefined {
+    const sessionId = process.env.RELAY_ATEM_PLANE_SESSION_ID?.trim();
+    const edgeToken = process.env.RELAY_ATEM_PLANE_EDGE_TOKEN?.trim();
+    if (!sessionId || !edgeToken) return undefined;
+    return { sessionId, edgeToken };
+  }
+
+  private ensureAtemPlaneRoom(): void {
+    const cfg = this.getAtemPlaneConfig();
+    if (!cfg) return;
+    if (this.rooms.has(cfg.sessionId)) return;
+    this.rooms.set(cfg.sessionId, {
+      sessionId: cfg.sessionId,
+      sessionName: "__atem_plane__",
+      deviceId: "atem-plane",
+      clients: new Set(),
+      edgeToken: cfg.edgeToken,
+      hiddenAtemPlane: true,
+    });
+  }
+
+  private getAtemPlaneRoom(): Room | undefined {
+    const cfg = this.getAtemPlaneConfig();
+    return cfg ? this.rooms.get(cfg.sessionId) : undefined;
+  }
+
+  /** LAN ATEM TCP attaches to the plane room when env is set; otherwise to the operator session room. */
+  private edgeRoomForAtemOperator(operatorRoom: Room): Room {
+    const pr = this.getAtemPlaneRoom();
+    return pr && this.getAtemPlaneConfig() ? pr : operatorRoom;
+  }
+
+  private isAtemPlaneSessionId(sessionId: string): boolean {
+    const cfg = this.getAtemPlaneConfig();
+    return !!cfg && cfg.sessionId === sessionId;
+  }
+
+  private bumpAtemPlaneInterest(sessionId: string): void {
+    this.atemPlaneInterest.set(sessionId, (this.atemPlaneInterest.get(sessionId) ?? 0) + 1);
+  }
+
+  private dropAtemPlaneInterest(sessionId: string): void {
+    const n = (this.atemPlaneInterest.get(sessionId) ?? 0) - 1;
+    if (n <= 0) this.atemPlaneInterest.delete(sessionId);
+    else this.atemPlaneInterest.set(sessionId, n);
+    this.disconnectAtemPlaneEdgeIfIdle();
+  }
+
+  private totalAtemPlaneInterest(): number {
+    let t = 0;
+    for (const n of this.atemPlaneInterest.values()) t += n;
+    return t;
+  }
+
+  /** Fan out JSON lines from the LAN ATEM edge (plane room) to every subscribed operator session. */
+  private emitAtemPlaneToSubscribers(payloadJson: string): void {
+    for (const sid of this.atemPlaneInterest.keys()) {
+      const room = this.rooms.get(sid);
+      const h = room?.host;
+      if (h?.readyState === 1) {
+        try {
+          h.send(payloadJson);
+        } catch {
+          /* ignore */
+        }
+      }
+      this.routeToJoiners(sid, payloadJson);
+    }
+  }
+
+  private disconnectAtemPlaneEdgeIfIdle(): void {
+    if (this.totalAtemPlaneInterest() > 0) return;
+    const pr = this.getAtemPlaneRoom();
+    const e = pr?.atemEdgeSocket;
+    if (!e || e.readyState !== 1) return;
+    try {
+      e.send(JSON.stringify({ type: "atem_edge_control", command: "disconnect" } satisfies RelayWireMessage));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private findAtemEdgeRoom(ws: WsType): string | undefined {
+    for (const [sid, r] of this.rooms) {
+      if (r.atemEdgeSocket === ws) return sid;
+    }
+    return undefined;
+  }
+
+  private findConnectorSocket(ws: WsType): string | undefined {
+    for (const [id, c] of this.atemConnectors) {
+      if (c.socket === ws) return id;
+    }
+    return undefined;
+  }
+
+  private sessionsUsingConnector(connectorId: string): number {
+    let n = 0;
+    for (const cid of this.sessionAtemConnector.values()) {
+      if (cid === connectorId) n += 1;
+    }
+    return n;
+  }
+
+  /** Drop TCP on the connector when no operator session is bound. */
+  private maybeDisconnectConnector(connectorId: string): void {
+    if (this.sessionsUsingConnector(connectorId) > 0) return;
+    const c = this.atemConnectors.get(connectorId);
+    const sock = c?.socket;
+    if (!sock || sock.readyState !== 1) return;
+    try {
+      sock.send(JSON.stringify({ type: "atem_edge_control", command: "disconnect" } satisfies RelayWireMessage));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private emitPanelSyncToConnectorSubscribers(
+    connectorId: string,
+    snapshot: Record<string, unknown>,
+  ): void {
+    for (const [sessionId, cid] of this.sessionAtemConnector.entries()) {
+      if (cid !== connectorId) continue;
+      this.emitPanelSyncFromAtem(sessionId, snapshot);
+    }
+  }
+
+  private emitJsonToConnectorSubscribers(connectorId: string, payloadJson: string): void {
+    for (const [sessionId, cid] of this.sessionAtemConnector.entries()) {
+      if (cid !== connectorId) continue;
+      const room = this.rooms.get(sessionId);
+      const h = room?.host;
+      if (h?.readyState === 1) {
+        try {
+          h.send(payloadJson);
+        } catch {
+          /* ignore */
+        }
+      }
+      this.routeToJoiners(sessionId, payloadJson);
+    }
+  }
+
+  /** HTTP: connectors registered by LAN agents (named ATEM TCP bridges). */
+  async listAtemConnectors(): Promise<
+    {
+      id: string;
+      name: string;
+      online: boolean;
+      tcpLinked?: boolean;
+      target?: { address: string; cameraId: number; port?: number };
+    }[]
+  > {
+    return [...this.atemConnectors.values()]
+      .map((c) => ({
+        id: c.id,
+        name: c.name,
+        online: c.socket?.readyState === 1,
+        tcpLinked: c.tcpLinked,
+        target: c.target,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  private routeForwardCmdToAtemEdge(room: Room, hex: string): void {
+    const e = room.atemEdgeSocket;
+    if (!e || e.readyState !== 1 || !hex.trim()) return;
+    try {
+      e.send(JSON.stringify({ type: "atem_edge_forward_cmd", hex } satisfies RelayWireMessage));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private routeForwardCmdToConnector(connectorId: string, hex: string): void {
+    const c = this.atemConnectors.get(connectorId);
+    const sock = c?.socket;
+    if (!sock || sock.readyState !== 1 || !hex.trim()) return;
+    try {
+      sock.send(JSON.stringify({ type: "atem_edge_forward_cmd", hex } satisfies RelayWireMessage));
+    } catch {
+      /* ignore */
+    }
+  }
 
   constructor(redisUrl?: string) {
     this.redisUrl = redisUrl?.trim() || undefined;
@@ -139,15 +414,21 @@ export class RelayCoordinator {
   async listSessions(): Promise<
     { id: string; name: string; deviceId: string; atemCcuTcp?: boolean }[]
   > {
+    this.ensureAtemPlaneRoom();
     await this.ensureRedis();
     if (!this.redis) {
       return [...this.rooms.values()]
-        .filter((r) => !!r.host)
+        .filter((r) => !!r.host && !r.hiddenAtemPlane)
         .map((r) => ({
           id: r.sessionId,
           name: r.sessionName,
           deviceId: r.deviceId,
-          atemCcuTcp: r.atemBridge ? r.atemBridge.isTcpLinked : undefined,
+          atemCcuTcp:
+            r.atemBridge !== undefined
+              ? r.atemBridge.isTcpLinked
+              : r.edgeTcpLinked !== undefined
+                ? r.edgeTcpLinked
+                : undefined,
         }));
     }
     const keys = await this.redis.pub.keys(`${REDIS_PREFIX_SESSION}*`);
@@ -289,21 +570,21 @@ export class RelayCoordinator {
       emitPanelSync: (snapshot) => this.emitPanelSyncFromAtem(sessionId, snapshot),
       hostSocket: () => room.host,
       onAtemTcpLinkChange: (linked) => {
+        const linkMsg = JSON.stringify({
+          type: "atem_ccu_link",
+          connected: linked,
+          address: linked ? address : undefined,
+          cameraId: linked ? cameraId : undefined,
+        } satisfies RelayWireMessage);
         const h = room.host;
         if (h?.readyState === 1) {
           try {
-            h.send(
-              JSON.stringify({
-                type: "atem_ccu_link",
-                connected: linked,
-                address: linked ? address : undefined,
-                cameraId: linked ? cameraId : undefined,
-              } satisfies RelayWireMessage),
-            );
+            h.send(linkMsg);
           } catch {
             /* ignore */
           }
         }
+        this.routeToJoiners(sessionId, linkMsg);
         void this.refreshRedisMeta(room);
       },
       notifyHost: (message) => {
@@ -333,16 +614,50 @@ export class RelayCoordinator {
   }
 
   private handleSocket(ws: WsType, _req: IncomingMessage): void {
+    this.ensureAtemPlaneRoom();
     let roomId: string | undefined;
     let role: "host" | "join" | undefined;
+    let edgeRoomId: string | undefined;
+    let edgeRole: "atem_edge" | undefined;
+    /** WS acts as a named ATEM connector after {@link RelayWireMessage} `atem_connector_register`. */
+    let atemConnectorRoleId: string | undefined;
 
+    const teardownConnector = (): void => {
+      if (!atemConnectorRoleId) return;
+      const cid = atemConnectorRoleId;
+      const c = this.atemConnectors.get(cid);
+      if (c?.socket === ws) {
+        c.socket = undefined;
+        c.tcpLinked = undefined;
+      }
+      atemConnectorRoleId = undefined;
+      if (this.sessionsUsingConnector(cid) > 0) {
+        const linkMsg = JSON.stringify({ type: "atem_ccu_link", connected: false } satisfies RelayWireMessage);
+        this.emitJsonToConnectorSubscribers(cid, linkMsg);
+      }
+    };
+    const teardownEdge = (): void => {
+      if (!edgeRoomId || edgeRole !== "atem_edge") return;
+      const room = this.rooms.get(edgeRoomId);
+      if (room?.atemEdgeSocket === ws) {
+        room.atemEdgeSocket = undefined;
+        room.edgeTcpLinked = undefined;
+        void this.refreshRedisMeta(room).catch(() => {});
+      }
+      edgeRoomId = undefined;
+      edgeRole = undefined;
+    };
     const teardownJoin = (): void => {
       if (!roomId || role !== "join") return;
       const room = this.rooms.get(roomId);
       if (!room) return;
+      if (room.atemJoinerSocket === ws) {
+        this.disposeAtemBridge(room);
+        room.atemJoinerSocket = undefined;
+      }
       room.clients.delete(ws);
       void this.refreshRedisMeta(room).catch(() => {});
-      if (!room.host && room.clients.size === 0) {
+      if (!room.host && room.clients.size === 0 && !room.hiddenAtemPlane) {
         this.rooms.delete(roomId);
         void this.deleteRedisMeta(roomId).catch(() => {});
       }
@@ -354,13 +669,19 @@ export class RelayCoordinator {
       if (!roomId || role !== "host") return;
       const room = this.rooms.get(roomId);
       if (room?.host === ws) {
+        this.dropAtemPlaneInterest(room.sessionId);
+        const prevConn = this.sessionAtemConnector.get(room.sessionId);
+        if (prevConn !== undefined) {
+          this.sessionAtemConnector.delete(room.sessionId);
+          this.maybeDisconnectConnector(prevConn);
+        }
         this.disposeAtemBridge(room);
         if (room.hostPingInterval) clearInterval(room.hostPingInterval);
         room.host = undefined;
         void this.refreshRedisMeta(room).catch(() => {});
         this.broadcastSessionEnded(room.sessionId);
       }
-      if (room && !room.host && room.clients.size === 0) {
+      if (room && !room.host && room.clients.size === 0 && !room.hiddenAtemPlane) {
         this.rooms.delete(room.sessionId);
         void this.deleteRedisMeta(room.sessionId).catch(() => {});
       }
@@ -371,6 +692,8 @@ export class RelayCoordinator {
     ws.on("close", () => {
       teardownJoin();
       teardownHost();
+      teardownConnector();
+      teardownEdge();
     });
 
     ws.on("message", async (data, isBinary) => {
@@ -379,7 +702,243 @@ export class RelayCoordinator {
       const parsed = safeJsonParse(raw);
       if (!isRelayWireMessage(parsed)) return;
 
+      const connectorUplinkId = this.findConnectorSocket(ws);
+      if (connectorUplinkId) {
+        const p = parsed as { type?: string };
+        switch (p.type) {
+          case "atem_connector_panel_sync": {
+            const snap = (parsed as { snapshot?: unknown }).snapshot;
+            if (snap && typeof snap === "object") {
+              this.emitPanelSyncToConnectorSubscribers(
+                connectorUplinkId,
+                snap as Record<string, unknown>,
+              );
+            }
+            break;
+          }
+          case "atem_connector_link": {
+            const conn = this.atemConnectors.get(connectorUplinkId);
+            if (conn) {
+              conn.tcpLinked = Boolean((parsed as { connected?: unknown }).connected);
+            }
+            const addr =
+              typeof (parsed as { address?: unknown }).address === "string"
+                ? (parsed as { address: string }).address
+                : undefined;
+            const camRaw = (parsed as { cameraId?: unknown }).cameraId;
+            const cameraId =
+              typeof camRaw === "number" && Number.isFinite(camRaw)
+                ? camRaw
+                : typeof camRaw === "string" && Number.isFinite(Number(camRaw))
+                  ? Number(camRaw)
+                  : undefined;
+            const linkMsg = JSON.stringify({
+              type: "atem_ccu_link",
+              connected: Boolean((parsed as { connected?: unknown }).connected),
+              address: (parsed as { connected?: unknown }).connected ? addr : undefined,
+              cameraId: (parsed as { connected?: unknown }).connected ? cameraId : undefined,
+            } satisfies RelayWireMessage);
+            this.emitJsonToConnectorSubscribers(connectorUplinkId, linkMsg);
+            break;
+          }
+          case "atem_connector_notify": {
+            const kind = (parsed as { kind?: unknown }).kind;
+            const message = String((parsed as { message?: unknown }).message ?? "");
+            if (kind === "error") {
+              const errLine = JSON.stringify({ type: "atem_ccu_error", message } satisfies RelayWireMessage);
+              this.emitJsonToConnectorSubscribers(connectorUplinkId, errLine);
+            } else if (message) {
+              const line = JSON.stringify({ type: "atem_ccu_log", message } satisfies RelayWireMessage);
+              this.emitJsonToConnectorSubscribers(connectorUplinkId, line);
+            }
+            break;
+          }
+          default:
+            break;
+        }
+        return;
+      }
+
+      const edgeSid = this.findAtemEdgeRoom(ws);
+      if (edgeSid) {
+        const p = parsed as { type?: string; sessionId?: string };
+        const sid = typeof p.sessionId === "string" ? p.sessionId.trim() : "";
+        if (sid !== edgeSid) return;
+        switch (p.type) {
+          case "atem_edge_panel_sync": {
+            const snap = (parsed as { snapshot?: unknown }).snapshot;
+            if (snap && typeof snap === "object") {
+              const shot = snap as Record<string, unknown>;
+              if (this.isAtemPlaneSessionId(edgeSid)) {
+                for (const subSid of this.atemPlaneInterest.keys()) {
+                  this.emitPanelSyncFromAtem(subSid, shot);
+                }
+              } else {
+                this.emitPanelSyncFromAtem(edgeSid, shot);
+              }
+            }
+            break;
+          }
+          case "atem_edge_link": {
+            const er = this.rooms.get(edgeSid);
+            if (!er) break;
+            er.edgeTcpLinked = Boolean((parsed as { connected?: unknown }).connected);
+            void this.refreshRedisMeta(er).catch(() => {});
+            const addr =
+              typeof (parsed as { address?: unknown }).address === "string"
+                ? (parsed as { address: string }).address
+                : undefined;
+            const camRaw = (parsed as { cameraId?: unknown }).cameraId;
+            const cameraId =
+              typeof camRaw === "number" && Number.isFinite(camRaw)
+                ? camRaw
+                : typeof camRaw === "string" && Number.isFinite(Number(camRaw))
+                  ? Number(camRaw)
+                  : undefined;
+            const linkMsg = JSON.stringify({
+              type: "atem_ccu_link",
+              connected: Boolean((parsed as { connected?: unknown }).connected),
+              address: (parsed as { connected?: unknown }).connected ? addr : undefined,
+              cameraId: (parsed as { connected?: unknown }).connected ? cameraId : undefined,
+            } satisfies RelayWireMessage);
+            if (this.isAtemPlaneSessionId(edgeSid)) {
+              this.emitAtemPlaneToSubscribers(linkMsg);
+              break;
+            }
+            const h = er.host;
+            if (h?.readyState === 1) {
+              try {
+                h.send(linkMsg);
+              } catch {
+                /* ignore */
+              }
+            }
+            this.routeToJoiners(edgeSid, linkMsg);
+            break;
+          }
+          case "atem_edge_notify": {
+            const er = this.rooms.get(edgeSid);
+            const kind = (parsed as { kind?: unknown }).kind;
+            const message = String((parsed as { message?: unknown }).message ?? "");
+            if (this.isAtemPlaneSessionId(edgeSid)) {
+              if (kind === "error") {
+                const errLine = JSON.stringify({ type: "atem_ccu_error", message } satisfies RelayWireMessage);
+                this.emitAtemPlaneToSubscribers(errLine);
+              } else if (message) {
+                const line = JSON.stringify({ type: "atem_ccu_log", message } satisfies RelayWireMessage);
+                this.emitAtemPlaneToSubscribers(line);
+              }
+              break;
+            }
+            const h = er?.host;
+            if (kind === "error") {
+              if (h?.readyState === 1) {
+                try {
+                  h.send(JSON.stringify({ type: "atem_ccu_error", message } satisfies RelayWireMessage));
+                } catch {
+                  /* ignore */
+                }
+              }
+            } else if (message) {
+              const line = JSON.stringify({ type: "atem_ccu_log", message } satisfies RelayWireMessage);
+              if (h?.readyState === 1) {
+                try {
+                  h.send(line);
+                } catch {
+                  /* ignore */
+                }
+              }
+              this.routeToJoiners(edgeSid, line);
+            }
+            break;
+          }
+          default:
+            break;
+        }
+        return;
+      }
+
       switch (parsed.type) {
+        case "atem_connector_register": {
+          const name = String((parsed as { name?: unknown }).name ?? "").trim().slice(0, 80);
+          if (!name) {
+            try {
+              ws.close(4000, "atem_connector_register name");
+            } catch {
+              /* ignore */
+            }
+            return;
+          }
+          const existingId = String((parsed as { connectorId?: unknown }).connectorId ?? "").trim();
+          const existingTok = String((parsed as { token?: unknown }).token ?? "").trim();
+          let conn: AtemConnector;
+          if (existingId && existingTok) {
+            const c = this.atemConnectors.get(existingId);
+            if (!c || c.token !== existingTok) {
+              try {
+                ws.send(JSON.stringify({ type: "session_ended" } satisfies RelayWireMessage));
+                ws.close(4003, "bad connector token");
+              } catch {
+                /* ignore */
+              }
+              return;
+            }
+            conn = c;
+            if (conn.socket && conn.socket !== ws && conn.socket.readyState === 1) {
+              try {
+                conn.socket.close(4100, "connector replaced");
+              } catch {
+                /* ignore */
+              }
+            }
+          } else {
+            // Name-based identity fallback: if the LAN agent starts without persisted id/token,
+            // reclaim an existing connector with the same name instead of creating duplicates.
+            const sameName = [...this.atemConnectors.values()].filter(
+              (c) => connectorNameKey(c.name) === connectorNameKey(name),
+            );
+            const existingOnline = sameName.find((c) => c.socket && c.socket.readyState === 1);
+            const existingOffline = sameName.find((c) => !c.socket || c.socket.readyState !== 1);
+            conn =
+              existingOnline ??
+              existingOffline ?? {
+                id: randomUUID(),
+                name,
+                token: randomBytes(24).toString("base64url"),
+              };
+            this.atemConnectors.set(conn.id, conn);
+
+            // Collapse stale duplicate entries of the same name.
+            for (const c of sameName) {
+              if (c.id === conn.id) continue;
+              for (const [sid, cid] of this.sessionAtemConnector.entries()) {
+                if (cid === c.id) this.sessionAtemConnector.set(sid, conn.id);
+              }
+              this.atemConnectors.delete(c.id);
+            }
+
+            if (conn.socket && conn.socket !== ws && conn.socket.readyState === 1) {
+              try {
+                conn.socket.close(4100, "connector replaced by same-name register");
+              } catch {
+                /* ignore */
+              }
+            }
+          }
+          conn.name = name;
+          conn.socket = ws;
+          atemConnectorRoleId = conn.id;
+          ws.send(
+            JSON.stringify({
+              type: "atem_connector_ready",
+              connectorId: conn.id,
+              token: conn.token,
+              name: conn.name,
+            } satisfies RelayWireMessage),
+          );
+          break;
+        }
+
         case "host_register": {
           const name = String(parsed.sessionName ?? "").trim().slice(0, 120);
           const deviceId = String(parsed.deviceId ?? "").trim().slice(0, 512);
@@ -388,12 +947,14 @@ export class RelayCoordinator {
             return;
           }
           const sessionId = randomUUID();
+          const edgeToken = randomBytes(24).toString("base64url");
           const room: Room = {
             sessionId,
             sessionName: name,
             deviceId,
             host: ws,
             clients: new Set(),
+            edgeToken,
           };
           this.rooms.set(sessionId, room);
           role = "host";
@@ -406,12 +967,28 @@ export class RelayCoordinator {
             void this.refreshRedisMeta(room);
           }, 20000);
           void this.refreshRedisMeta(room);
-          ws.send(JSON.stringify({ type: "hosted", sessionId } satisfies RelayWireMessage));
+          const planeCfg = this.getAtemPlaneConfig();
+          ws.send(
+            JSON.stringify({
+              type: "hosted",
+              sessionId,
+              edgeToken,
+              ...(planeCfg ? { atemPlaneSessionId: planeCfg.sessionId } : {}),
+            } satisfies RelayWireMessage),
+          );
 
           const acParsed = this.parseAtemCcuRaw((parsed as { atemCcu?: unknown }).atemCcu);
-          if (acParsed) {
+          if (acParsed && this.hubAtemBridgeAllowed()) {
             this.disposeAtemBridge(room);
             this.startAtemBridgeFromPayload(sessionId, room, acParsed);
+          } else if ((parsed as { atemCcu?: unknown }).atemCcu && !this.hubAtemBridgeAllowed()) {
+            ws.send(
+              JSON.stringify({
+                type: "atem_ccu_error",
+                message:
+                  "Hub ATEM TCP disabled (RELAY_ATEM_HUB_BRIDGE=0). Run the LAN edge agent with this session's edge token.",
+              } satisfies RelayWireMessage),
+            );
           } else if ((parsed as { atemCcu?: unknown }).atemCcu) {
             ws.send(JSON.stringify({ type: "atem_ccu_error", message: "Invalid atemCcu address or cameraId" }));
           }
@@ -428,8 +1005,338 @@ export class RelayCoordinator {
             ws.send(JSON.stringify({ type: "atem_ccu_error", message: "Invalid atemCcu address or cameraId" }));
             return;
           }
+          const connectorIdOpt = String((parsed as { connectorId?: unknown }).connectorId ?? "").trim();
+          if (connectorIdOpt) {
+            const conn = this.atemConnectors.get(connectorIdOpt);
+            if (!conn?.socket || conn.socket.readyState !== 1) {
+              ws.send(
+                JSON.stringify({
+                  type: "atem_ccu_error",
+                  message: "That ATEM connector is offline. Start the LAN agent or refresh the list.",
+                } satisfies RelayWireMessage),
+              );
+              return;
+            }
+            conn.target = {
+              address: acParsed.address,
+              cameraId: acParsed.cameraId,
+              ...(acParsed.port !== undefined && Number.isFinite(acParsed.port) ? { port: acParsed.port } : {}),
+            };
+            this.sessionAtemConnector.set(hostRoomId, connectorIdOpt);
+            try {
+              conn.socket.send(
+                JSON.stringify({
+                  type: "atem_edge_control",
+                  sessionId: hostRoomId,
+                  command: "connect",
+                  atemCcu: acParsed,
+                } satisfies RelayWireMessage),
+              );
+            } catch {
+              /* ignore */
+            }
+            return;
+          }
+          this.ensureAtemPlaneRoom();
+          const edgeRoom = this.edgeRoomForAtemOperator(hostRoom);
+          if (edgeRoom.atemEdgeSocket && edgeRoom.atemEdgeSocket.readyState === 1) {
+            try {
+              edgeRoom.atemEdgeSocket.send(
+                JSON.stringify({
+                  type: "atem_edge_control",
+                  sessionId: hostRoomId,
+                  command: "connect",
+                  atemCcu: acParsed,
+                } satisfies RelayWireMessage),
+              );
+            } catch {
+              /* ignore */
+            }
+            if (this.getAtemPlaneConfig() && edgeRoom.hiddenAtemPlane) {
+              this.bumpAtemPlaneInterest(hostRoomId);
+            }
+            return;
+          }
+          if (!this.hubAtemBridgeAllowed()) {
+            const planeHint = this.getAtemPlaneConfig()
+              ? `RELAY_ATEM_PLANE_SESSION_ID / RELAY_ATEM_PLANE_EDGE_TOKEN on relay + LAN agent, or set RELAY_ATEM_HUB_BRIDGE=1.`
+              : `npm run atem:edge-agent with this session's edge token from hosted, or set RELAY_ATEM_HUB_BRIDGE=1.`;
+            ws.send(
+              JSON.stringify({
+                type: "atem_ccu_error",
+                message: `No ATEM edge connected; run ${planeHint}`,
+              } satisfies RelayWireMessage),
+            );
+            return;
+          }
           this.disposeAtemBridge(hostRoom);
+          hostRoom.atemJoinerSocket = undefined;
           this.startAtemBridgeFromPayload(hostRoomId, hostRoom, acParsed);
+          break;
+        }
+
+        case "atem_edge_control": {
+          const hostRoomId = [...this.rooms.entries()].find(([, rr]) => rr.host === ws)?.[0];
+          if (!hostRoomId) return;
+          const hostRoom = this.rooms.get(hostRoomId);
+          if (!hostRoom || hostRoom.host !== ws) return;
+          const cmd = (parsed as { command?: unknown }).command;
+          if (cmd !== "connect" && cmd !== "disconnect" && cmd !== "restart") return;
+          const connectorCtl = String((parsed as { connectorId?: unknown }).connectorId ?? "").trim();
+          if (connectorCtl) {
+            const conn = this.atemConnectors.get(connectorCtl);
+            if (!conn?.socket || conn.socket.readyState !== 1) return;
+            if (cmd === "connect") {
+              const ac = this.parseAtemCcuRaw((parsed as { atemCcu?: unknown }).atemCcu);
+              if (!ac) return;
+              conn.target = {
+                address: ac.address,
+                cameraId: ac.cameraId,
+                ...(ac.port !== undefined && Number.isFinite(ac.port) ? { port: ac.port } : {}),
+              };
+              this.sessionAtemConnector.set(hostRoomId, connectorCtl);
+              try {
+                conn.socket.send(
+                  JSON.stringify({
+                    type: "atem_edge_control",
+                    sessionId: hostRoomId,
+                    command: "connect",
+                    atemCcu: ac,
+                  } satisfies RelayWireMessage),
+                );
+              } catch {
+                /* ignore */
+              }
+            } else {
+              try {
+                conn.socket.send(
+                  JSON.stringify({
+                    type: "atem_edge_control",
+                    sessionId: hostRoomId,
+                    command: cmd,
+                  } satisfies RelayWireMessage),
+                );
+              } catch {
+                /* ignore */
+              }
+            }
+            break;
+          }
+          this.ensureAtemPlaneRoom();
+          const edgeRoom = this.edgeRoomForAtemOperator(hostRoom);
+          if (!edgeRoom.atemEdgeSocket || edgeRoom.atemEdgeSocket.readyState !== 1) return;
+          const edgeWs = edgeRoom.atemEdgeSocket;
+          if (cmd === "connect") {
+            const ac = this.parseAtemCcuRaw((parsed as { atemCcu?: unknown }).atemCcu);
+            if (!ac) return;
+            try {
+              edgeWs.send(
+                JSON.stringify({
+                  type: "atem_edge_control",
+                  sessionId: hostRoomId,
+                  command: "connect",
+                  atemCcu: ac,
+                } satisfies RelayWireMessage),
+              );
+            } catch {
+              /* ignore */
+            }
+            if (this.getAtemPlaneConfig() && edgeRoom.hiddenAtemPlane) {
+              this.bumpAtemPlaneInterest(hostRoomId);
+            }
+          } else {
+            try {
+              edgeWs.send(
+                JSON.stringify({
+                  type: "atem_edge_control",
+                  sessionId: hostRoomId,
+                  command: cmd,
+                } satisfies RelayWireMessage),
+              );
+            } catch {
+              /* ignore */
+            }
+          }
+          break;
+        }
+
+        case "atem_edge_register": {
+          this.ensureAtemPlaneRoom();
+          const regSid = String((parsed as { sessionId?: unknown }).sessionId ?? "").trim();
+          const tok = String((parsed as { token?: unknown }).token ?? "").trim();
+          const cfg = this.getAtemPlaneConfig();
+          let regRoom =
+            cfg && regSid === cfg.sessionId && tok === cfg.edgeToken ? this.getAtemPlaneRoom() : this.rooms.get(regSid);
+          if (!regRoom?.edgeToken || regRoom.edgeToken !== tok) {
+            try {
+              ws.send(JSON.stringify({ type: "session_ended" } satisfies RelayWireMessage));
+              ws.close(4003, "bad atem_edge_register");
+            } catch {
+              /* ignore */
+            }
+            return;
+          }
+          if (regRoom.atemEdgeSocket && regRoom.atemEdgeSocket !== ws && regRoom.atemEdgeSocket.readyState === 1) {
+            try {
+              ws.close(4009, "edge already connected");
+            } catch {
+              /* ignore */
+            }
+            return;
+          }
+          this.disposeAtemBridge(regRoom);
+          regRoom.atemJoinerSocket = undefined;
+          regRoom.atemHttpAttached = undefined;
+          regRoom.atemEdgeSocket = ws;
+          edgeRoomId = regRoom.sessionId;
+          edgeRole = "atem_edge";
+          ws.send(JSON.stringify({ type: "atem_edge_ready", sessionId: regRoom.sessionId } satisfies RelayWireMessage));
+          void this.refreshRedisMeta(regRoom).catch(() => {});
+          break;
+        }
+
+        case "joiner_atem_ccu_register": {
+          const joinSid = this.findJoinerSession(ws);
+          if (!joinSid) return;
+          const joinRoom = this.rooms.get(joinSid);
+          if (!joinRoom || !joinRoom.clients.has(ws)) return;
+          const acParsed = this.parseAtemCcuRaw((parsed as { atemCcu?: unknown }).atemCcu);
+          if (!acParsed) {
+            ws.send(JSON.stringify({ type: "atem_ccu_error", message: "Invalid atemCcu address or cameraId" }));
+            return;
+          }
+          const connectorIdJoin = String((parsed as { connectorId?: unknown }).connectorId ?? "").trim();
+          if (connectorIdJoin) {
+            const conn = this.atemConnectors.get(connectorIdJoin);
+            if (!conn?.socket || conn.socket.readyState !== 1) {
+              ws.send(
+                JSON.stringify({
+                  type: "atem_ccu_error",
+                  message: "That ATEM connector is offline. Start the LAN agent or refresh the list.",
+                } satisfies RelayWireMessage),
+              );
+              return;
+            }
+            conn.target = {
+              address: acParsed.address,
+              cameraId: acParsed.cameraId,
+              ...(acParsed.port !== undefined && Number.isFinite(acParsed.port) ? { port: acParsed.port } : {}),
+            };
+            this.sessionAtemConnector.set(joinSid, connectorIdJoin);
+            try {
+              conn.socket.send(
+                JSON.stringify({
+                  type: "atem_edge_control",
+                  sessionId: joinSid,
+                  command: "connect",
+                  atemCcu: acParsed,
+                } satisfies RelayWireMessage),
+              );
+            } catch {
+              /* ignore */
+            }
+            return;
+          }
+          this.ensureAtemPlaneRoom();
+          const edgeRoom = this.edgeRoomForAtemOperator(joinRoom);
+          if (edgeRoom.atemEdgeSocket && edgeRoom.atemEdgeSocket.readyState === 1) {
+            try {
+              edgeRoom.atemEdgeSocket.send(
+                JSON.stringify({
+                  type: "atem_edge_control",
+                  sessionId: joinSid,
+                  command: "connect",
+                  atemCcu: acParsed,
+                } satisfies RelayWireMessage),
+              );
+            } catch {
+              /* ignore */
+            }
+            if (this.getAtemPlaneConfig() && edgeRoom.hiddenAtemPlane) {
+              this.bumpAtemPlaneInterest(joinSid);
+            }
+            return;
+          }
+          if (!this.hubAtemBridgeAllowed()) {
+            const planeHint = this.getAtemPlaneConfig()
+              ? `RELAY_ATEM_PLANE_SESSION_ID / RELAY_ATEM_PLANE_EDGE_TOKEN on relay + LAN agent, or set RELAY_ATEM_HUB_BRIDGE=1.`
+              : `npm run atem:edge-agent with this session's edge token from hosted, or set RELAY_ATEM_HUB_BRIDGE=1.`;
+            ws.send(
+              JSON.stringify({
+                type: "atem_ccu_error",
+                message: `No ATEM edge connected; run ${planeHint}`,
+              } satisfies RelayWireMessage),
+            );
+            return;
+          }
+          this.disposeAtemBridge(joinRoom);
+          joinRoom.atemJoinerSocket = ws;
+          this.startAtemBridgeFromPayload(joinSid, joinRoom, acParsed);
+          break;
+        }
+
+        case "joiner_atem_ccu_stop": {
+          const stopJoinSid = this.findJoinerSession(ws);
+          if (!stopJoinSid) return;
+          const stopJoinRoom = this.rooms.get(stopJoinSid);
+          if (!stopJoinRoom || stopJoinRoom.atemJoinerSocket !== ws) return;
+
+          const prevConnJoin = this.sessionAtemConnector.get(stopJoinSid);
+          if (prevConnJoin !== undefined) {
+            this.sessionAtemConnector.delete(stopJoinSid);
+            this.maybeDisconnectConnector(prevConnJoin);
+            stopJoinRoom.atemJoinerSocket = undefined;
+            void this.refreshRedisMeta(stopJoinRoom).catch(() => {});
+            if (ws.readyState === 1) {
+              try {
+                ws.send(JSON.stringify({ type: "atem_ccu_link", connected: false } satisfies RelayWireMessage));
+              } catch {
+                /* ignore */
+              }
+            }
+            return;
+          }
+
+          if (this.getAtemPlaneConfig()) {
+            this.dropAtemPlaneInterest(stopJoinSid);
+            stopJoinRoom.atemJoinerSocket = undefined;
+            void this.refreshRedisMeta(this.getAtemPlaneRoom() ?? stopJoinRoom).catch(() => {});
+            if (ws.readyState === 1) {
+              try {
+                ws.send(JSON.stringify({ type: "atem_ccu_link", connected: false } satisfies RelayWireMessage));
+              } catch {
+                /* ignore */
+              }
+            }
+            return;
+          }
+
+          if (stopJoinRoom.atemEdgeSocket && stopJoinRoom.atemEdgeSocket.readyState === 1) {
+            try {
+              stopJoinRoom.atemEdgeSocket.send(
+                JSON.stringify({
+                  type: "atem_edge_control",
+                  sessionId: stopJoinSid,
+                  command: "disconnect",
+                } satisfies RelayWireMessage),
+              );
+            } catch {
+              /* ignore */
+            }
+            stopJoinRoom.atemJoinerSocket = undefined;
+            void this.refreshRedisMeta(stopJoinRoom);
+            return;
+          }
+          this.disposeAtemBridge(stopJoinRoom);
+          stopJoinRoom.atemJoinerSocket = undefined;
+          void this.refreshRedisMeta(stopJoinRoom);
+          if (ws.readyState === 1) {
+            try {
+              ws.send(JSON.stringify({ type: "atem_ccu_link", connected: false } satisfies RelayWireMessage));
+            } catch {
+              /* ignore */
+            }
+          }
           break;
         }
 
@@ -438,6 +1345,50 @@ export class RelayCoordinator {
           if (!stopRoomId) return;
           const stopRoom = this.rooms.get(stopRoomId);
           if (!stopRoom || stopRoom.host !== ws) return;
+
+          const prevConnHost = this.sessionAtemConnector.get(stopRoomId);
+          if (prevConnHost !== undefined) {
+            this.sessionAtemConnector.delete(stopRoomId);
+            this.maybeDisconnectConnector(prevConnHost);
+            void this.refreshRedisMeta(stopRoom).catch(() => {});
+            if (ws.readyState === 1) {
+              try {
+                ws.send(JSON.stringify({ type: "atem_ccu_link", connected: false } satisfies RelayWireMessage));
+              } catch {
+                /* ignore */
+              }
+            }
+            return;
+          }
+
+          if (this.getAtemPlaneConfig()) {
+            this.dropAtemPlaneInterest(stopRoomId);
+            void this.refreshRedisMeta(this.getAtemPlaneRoom() ?? stopRoom).catch(() => {});
+            if (ws.readyState === 1) {
+              try {
+                ws.send(JSON.stringify({ type: "atem_ccu_link", connected: false } satisfies RelayWireMessage));
+              } catch {
+                /* ignore */
+              }
+            }
+            return;
+          }
+
+          if (stopRoom.atemEdgeSocket && stopRoom.atemEdgeSocket.readyState === 1) {
+            try {
+              stopRoom.atemEdgeSocket.send(
+                JSON.stringify({
+                  type: "atem_edge_control",
+                  sessionId: stopRoomId,
+                  command: "disconnect",
+                } satisfies RelayWireMessage),
+              );
+            } catch {
+              /* ignore */
+            }
+            void this.refreshRedisMeta(stopRoom);
+            return;
+          }
           this.disposeAtemBridge(stopRoom);
           void this.refreshRedisMeta(stopRoom);
           if (ws.readyState === 1) {
@@ -454,6 +1405,16 @@ export class RelayCoordinator {
           const sessionId = String(parsed.sessionId ?? "").trim();
           if (!sessionId) {
             ws.close(4001, "missing sessionId");
+            return;
+          }
+          const planeCfg = this.getAtemPlaneConfig();
+          if (planeCfg && sessionId === planeCfg.sessionId) {
+            try {
+              ws.send(JSON.stringify({ type: "session_ended" } satisfies RelayWireMessage));
+              ws.close(4004, "reserved session");
+            } catch {
+              /* ignore */
+            }
             return;
           }
           let metaName = "";
@@ -523,6 +1484,42 @@ export class RelayCoordinator {
             typeof (parsed as { hex?: unknown }).hex === "string"
               ? ((parsed as { hex: string }).hex as string)
               : "";
+          const planeRoom = this.getAtemPlaneRoom();
+          if (
+            this.getAtemPlaneConfig() &&
+            planeRoom?.atemEdgeSocket &&
+            planeRoom.atemEdgeSocket.readyState === 1 &&
+            (this.atemPlaneInterest.get(id) ?? 0) > 0 &&
+            hex.trim() &&
+            room
+          ) {
+            const isHost = room.host === ws;
+            const isJoiner = room.clients.has(ws);
+            if (isHost || (isJoiner && joinerForwardCmdPreferAtemBridge(hex))) {
+              this.routeForwardCmdToAtemEdge(planeRoom, hex);
+              return;
+            }
+          }
+          const boundConnectorId = this.sessionAtemConnector.get(id);
+          if (boundConnectorId && hex.trim() && room) {
+            const cn = this.atemConnectors.get(boundConnectorId);
+            if (cn?.socket?.readyState === 1) {
+              const isHost = room.host === ws;
+              const isJoiner = room.clients.has(ws);
+              if (isHost || (isJoiner && joinerForwardCmdPreferAtemBridge(hex))) {
+                this.routeForwardCmdToConnector(boundConnectorId, hex);
+                return;
+              }
+            }
+          }
+          if (room?.atemEdgeSocket && room.atemEdgeSocket.readyState === 1 && hex.trim()) {
+            const isHost = room.host === ws;
+            const isJoiner = room.clients.has(ws);
+            if (isHost || (isJoiner && joinerForwardCmdPreferAtemBridge(hex))) {
+              this.routeForwardCmdToAtemEdge(room, hex);
+              return;
+            }
+          }
           if (room?.atemBridge && hex.trim()) {
             const fromJoiner = room.clients.has(ws);
             if (!fromJoiner || joinerForwardCmdPreferAtemBridge(hex)) {
@@ -629,6 +1626,21 @@ export class RelayCoordinator {
 
   private broadcastSessionEnded(sessionId: string): void {
     const line = JSON.stringify({ type: "session_ended" } satisfies RelayWireMessage);
+    const r0 = this.rooms.get(sessionId);
+    if (r0?.atemEdgeSocket?.readyState === 1) {
+      try {
+        r0.atemEdgeSocket.send(line);
+      } catch {
+        /* ignore */
+      }
+      try {
+        r0.atemEdgeSocket.close();
+      } catch {
+        /* ignore */
+      }
+      r0.atemEdgeSocket = undefined;
+      r0.edgeTcpLinked = undefined;
+    }
     this.routeToJoiners(sessionId, line);
     const r = this.rooms.get(sessionId);
     if (!r) return;
@@ -694,6 +1706,10 @@ export class RelayCoordinator {
     multi.hset(key, "name", room.sessionName, "deviceId", room.deviceId, "hasHost", hasHost);
     if (room.atemBridge !== undefined) {
       multi.hset(key, "atemTcp", room.atemBridge.isTcpLinked ? "1" : "0");
+    } else if (room.atemEdgeSocket !== undefined) {
+      if (room.edgeTcpLinked === true) multi.hset(key, "atemTcp", "1");
+      else if (room.edgeTcpLinked === false) multi.hset(key, "atemTcp", "0");
+      else multi.hdel(key, "atemTcp");
     } else {
       multi.hdel(key, "atemTcp");
     }

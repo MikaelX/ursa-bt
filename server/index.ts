@@ -249,6 +249,7 @@ const ROUTES = {
   state: /^\/api\/cameras\/([^/]+)\/state$/,
   atemCcuRelay: /^\/api\/cameras\/([^/]+)\/atem-ccu-relay$/,
   relaySessions: /^\/api\/relay\/sessions\/?$/,
+  relayAtemConnectors: /^\/api\/relay\/atem-connectors\/?$/,
 };
 
 const relayCoordinator = new RelayCoordinator(process.env.REDIS_URL);
@@ -313,6 +314,17 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const file = await saveAtemCcuRelay(decodeURIComponent(match[1]!), body);
     send(res, 200, file);
     return;
+  }
+
+  if (url.match(ROUTES.relayAtemConnectors) && method === "GET") {
+    try {
+      const connectors = await relayCoordinator.listAtemConnectors();
+      send(res, 200, { connectors });
+      return;
+    } catch (error) {
+      send(res, 500, { error: (error as Error).message });
+      return;
+    }
   }
 
   if (url.match(ROUTES.relaySessions) && method === "GET") {

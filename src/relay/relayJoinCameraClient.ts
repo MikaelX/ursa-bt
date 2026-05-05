@@ -21,7 +21,17 @@ type JoinWire =
   | { type: "forward_cmd"; hex: string }
   | { type: "host_power"; on: boolean }
   | { type: "host_pair" }
-  | { type: "shared_session_dirty" };
+  | { type: "shared_session_dirty" }
+  | ({ type: "joiner_atem_ccu_register"; atemCcu: JoinerAtemCcuRegister } & { connectorId?: string })
+  | { type: "joiner_atem_ccu_stop" };
+
+/** Hub ATEM CCU registration (same shape as relay host `atemCcu`). */
+export type JoinerAtemCcuRegister = {
+  address: string;
+  port?: number;
+  cameraId: number;
+  inputs?: number;
+};
 
 function hexEncode(bytes: Uint8Array): string {
   return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -47,6 +57,8 @@ export class RelayJoinedCameraClient implements CameraClient {
       onRelayPanelSync?: (snapshot: Record<string, unknown>) => void;
       onJoinedInfo: (deviceId: string, sessionDisplayName: string) => void;
       onDropped: () => void;
+      /** Same hub TCP link signal as relay host (`atem_ccu_link`). */
+      onAtemSwitcherTcp?: (detail: { connected: boolean; address?: string; cameraId?: number }) => void;
       log: (message: string) => void;
     },
   ) {}
@@ -150,6 +162,20 @@ export class RelayJoinedCameraClient implements CameraClient {
             if (msg) this.params.log(msg);
             break;
           }
+          case "atem_ccu_link": {
+            const c = parsed as { connected?: unknown; address?: unknown; cameraId?: unknown };
+            const connected = c.connected === true;
+            const address = typeof c.address === "string" ? c.address : undefined;
+            const camRaw = c.cameraId;
+            const cameraId =
+              typeof camRaw === "number" && Number.isFinite(camRaw)
+                ? camRaw
+                : typeof camRaw === "string" && Number.isFinite(Number(camRaw))
+                  ? Number(camRaw)
+                  : undefined;
+            this.params.onAtemSwitcherTcp?.({ connected, address, cameraId });
+            break;
+          }
           case "session_ended": {
             const hadJoined = this.acknowledged;
             if (hadJoined) this.params.log("Host stopped sharing");
@@ -221,6 +247,30 @@ export class RelayJoinedCameraClient implements CameraClient {
     if (!this.sock || this.sock.readyState !== WebSocket.OPEN) return;
     try {
       this.sock.send(JSON.stringify({ type: "shared_session_dirty" } satisfies JoinWire));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /** Attach hub ATEM CCU to the **joined** relay room (same session id), not a new `host_register`. */
+  registerJoinerAtemCcu(atem: JoinerAtemCcuRegister, connectorId?: string): void {
+    if (!this.sock || this.sock.readyState !== WebSocket.OPEN || !this.acknowledged) {
+      throw new Error("Relay join socket is not ready");
+    }
+    const cid = connectorId?.trim();
+    this.sock.send(
+      JSON.stringify(
+        cid
+          ? { type: "joiner_atem_ccu_register", atemCcu: atem, connectorId: cid }
+          : { type: "joiner_atem_ccu_register", atemCcu: atem },
+      ),
+    );
+  }
+
+  stopJoinerAtemCcu(): void {
+    if (!this.sock || this.sock.readyState !== WebSocket.OPEN || !this.acknowledged) return;
+    try {
+      this.sock.send(JSON.stringify({ type: "joiner_atem_ccu_stop" } satisfies JoinWire));
     } catch {
       /* ignore */
     }

@@ -46,6 +46,15 @@ function useLocalRelayHub(): boolean {
   return String(__APP_ENVIRONMENT__).trim().toUpperCase() === "LOCAL";
 }
 
+/**
+ * True when relay WS targets {@link DEFAULT_RELAY_HUB} (production hub), not same-origin `LOCAL` builds or Debug localhost override.
+ * Used to explain why hub-side ATEM TCP to RFC1918 addresses cannot succeed from the cloud.
+ */
+export function isRelayHubRemoteDeployment(): boolean {
+  if (useDebugRelayHubLocalhost()) return false;
+  return !useLocalRelayHub();
+}
+
 function relayBaseUrl(): URL {
   if (useDebugRelayHubLocalhost()) {
     return new URL(DEBUG_RELAY_LOCALHOST_ORIGIN);
@@ -67,4 +76,10 @@ export function getRelaySocketUrl(): string {
 export function getRelaySessionsUrl(): string {
   const base = relayBaseUrl();
   return new URL("/api/relay/sessions", base.origin).href;
+}
+
+/** HTTP URL for named ATEM TCP connectors (LAN edge agents). */
+export function getRelayAtemConnectorsUrl(): string {
+  const base = relayBaseUrl();
+  return new URL("/api/relay/atem-connectors", base.origin).href;
 }

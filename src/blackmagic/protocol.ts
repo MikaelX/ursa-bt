@@ -17,6 +17,9 @@ const CONFIG_COMMAND_LENGTH = 4;
 const BROADCAST_DESTINATION = 255;
 const FIXED16_MAX = (32767 / 2048);
 
+/** Iris master-black (lift luma only); narrower UI span than full protocol ±2. */
+export const MASTER_BLACK_RANGE = { min: -1, max: 1 } as const;
+
 export enum CameraControlDataType {
   VoidOrBool = 0,
   Int8 = 1,
@@ -258,7 +261,7 @@ export const commands = {
       category: 8,
       parameter: 0,
       dataType: CameraControlDataType.Fixed16,
-      payload: fixed16Payload(0, 0, 0, clamp(adjust, -2, 2)),
+      payload: fixed16Payload(0, 0, 0, clamp(adjust, MASTER_BLACK_RANGE.min, MASTER_BLACK_RANGE.max)),
     }),
 
   lift: (red: number, green: number, blue: number, luma: number) =>

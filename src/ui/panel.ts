@@ -1,3 +1,4 @@
+import { MASTER_BLACK_RANGE } from "../blackmagic/protocol";
 import { deviceNameLooksLikeAtemSwitcher, type CameraSnapshot } from "../blackmagic/cameraState";
 import { BANK_COUNT, SCENE_SLOT_COUNT } from "../banks/bank";
 import { formatSegSignedFixed2, populateSegSlots } from "./segmentDisplay";
@@ -532,8 +533,13 @@ function renderConnectView(bleAvailable: boolean, bleUi?: PanelBleUiOptions): st
           <h2 class="connect-atem-title">LAN camera control</h2>
         </div>
         <p class="muted connect-atem-hint">
-          Hub must reach the switcher on your LAN (e.g. <code class="connect-atem-code">npm run dev:server</code>). A relay session is opened automatically; CCU debug lines (<code class="connect-atem-code">[ccu h]</code>) appear in the log below once data flows.
+          Pick a <strong>named connector</strong> when the truck runs <code class="connect-atem-code">npm run atem:edge-agent</code> with <code class="connect-atem-code">CONNECTOR_NAME</code>. Then set switcher address / camera and tap Connect — the hub forwards commands to that LAN agent. Legacy: hub reaches the switcher directly only when the relay process runs on the same LAN as the ATEM.
         </p>
+        <div class="relay-atem-inline" data-relay-atem-inline>
+          <h3 class="relay-sessions-inline-title">ATEM connectors</h3>
+          <ul class="relay-session-list relay-session-list--inline" data-relay-atem-list aria-live="polite"></ul>
+          <p class="relay-session-empty muted" data-relay-atem-empty hidden></p>
+        </div>
         <div class="connect-atem-row">
           <label class="connect-atem-inline-field connect-atem-inline-field--address">
             <span class="connect-atem-inline-label">Address</span>
@@ -887,6 +893,9 @@ function renderIrisView(): string {
         </div>
 
         <div class="iris-secondary">
+          <div class="iris-secondary-exposure">
+            ${renderStepper("gain", "Master Gain", "gain", "0.0")}
+          </div>
           <div class="knob-cell iris-mb-cell" data-iris-mb-cell">
             <div class="iris-mb-bm-pot bm-pot">
               <div
@@ -894,9 +903,9 @@ function renderIrisView(): string {
                 data-iris-wheel
                 data-control
                 role="slider"
-                aria-label="Master black"
-                aria-valuemin="-2"
-                aria-valuemax="2"
+                aria-label="Master black (drag up or down)"
+                aria-valuemin="-1"
+                aria-valuemax="1"
                 aria-valuenow="0"
                 tabindex="0"
                 style="--angle: 0deg;"
@@ -1648,7 +1657,7 @@ function updateCameraBadge(root: HTMLElement, cameraNumber: number | undefined):
 
 /** Continuous master-gain span for most bodies (e.g. URSA Broadcast G2). Original URSA Broadcast uses {@link stepMasterGainDb} (−6…+18 dB, 2 dB steps). */
 export const MASTER_GAIN_RANGE = { min: -12, max: 30 };
-export const MASTER_BLACK_RANGE = { min: -2, max: 2 };
+export { MASTER_BLACK_RANGE };
 
 function updateIrisWheel(root: HTMLElement, snapshot: CameraSnapshot): void {
   const knob = root.querySelector<HTMLElement>("[data-iris-wheel]");

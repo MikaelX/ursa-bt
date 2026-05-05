@@ -19,8 +19,10 @@ import { blePacketsFromAtemPanelSyncClean } from "../relay/atemPanelSyncMirrorBl
 import { atemCcuTraceCatalogueLines, atemCcuTraceLogLineCompact } from "../relay/atemCcuDebugCatalogue";
 import {
   DEBUG_RELAY_HUB_LOCALHOST_LS,
+  getRelayAtemConnectorsUrl,
   getRelaySessionsUrl,
   getRelaySocketUrl,
+  isRelayHubRemoteDeployment,
 } from "../relay/relayUrl";
 import {
   MASTER_BLACK_RANGE,
@@ -29,7 +31,6 @@ import {
   PAINT_RANGE,
   isViewId,
   masterBlackToNormalised,
-  normalisedToMasterBlack,
   paintValueToAngle,
   hfaderValueFromClientX,
   positionHFaderHandle,
@@ -343,6 +344,9 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   let relayJoinedMode = false;
   /** Host `sessionName` from the last successful Join — overrides stale relay prefs for ATEM CCU room naming. */
   let relayJoinedDisplaySessionName: string | undefined;
+  /** Hub ATEM on the joined relay socket (`joiner_atem_ccu_*`), not a separate `host_register` room. */
+  let joinerAtemCcuActive = false;
+  let joinerAtemSwitcherTcpConnected = false;
   /** BLE GATT linked (device picked and connected locally). */
   let bleLinked = false;
 
@@ -355,7 +359,9 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       return;
     }
     const last = readLastNativeBleSnapshot();
-    const show = Boolean(last && !bleLinked && !relayJoinedMode && !relayHostBridge?.isAtemCcuHost);
+    const show = Boolean(
+      last && !bleLinked && !relayJoinedMode && !relayHostBridge?.isAtemCcuHost && !joinerAtemCcuActive,
+    );
     row.hidden = !show;
     if (!last) return;
     const hint = last.nameHint?.trim() || last.logicalId;
@@ -705,6 +711,23 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   /** Assigned once relay prefs exist — refreshes browser-only ATEM LAN row. */
   let syncAtemLanConnectUi: (() => void) | undefined;
 
+  /** RFC1918 / link-local — hub cannot dial these from a cloud relay. */
+  function atemTargetLooksUnreachableFromRemoteHub(addr: string): boolean {
+    const t = addr.trim().toLowerCase();
+    if (t === "localhost" || t.startsWith("127.")) return true;
+    const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(t);
+    if (!m) return false;
+    const a = Number(m[1]);
+    const b = Number(m[2]);
+    const parts = [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4])];
+    if (!parts.every((n) => n >= 0 && n <= 255)) return false;
+    if (a === 10) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 169 && b === 254) return true;
+    return false;
+  }
+
   /** Assigned after `rawClient` — runs native in-app BLE discovery when the Connect relay panel is visible. */
   let scheduleNativeBleDiscovery: (() => void) | undefined;
 
@@ -736,7 +759,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
 
     const joinToggle = root.querySelector<HTMLButtonElement>("[data-relay-join-toggle]");
     if (joinToggle) {
-      joinToggle.hidden = bleLinked || !!relayHostBridge?.isAtemCcuHost;
+      joinToggle.hidden = bleLinked;
       joinToggle.textContent = relayJoinedMode ? "Leave" : "Join";
       joinToggle.setAttribute(
         "aria-label",
@@ -745,7 +768,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     }
 
     const inlinePanel = root.querySelector<HTMLElement>("[data-relay-sessions-inline]");
-    if (inlinePanel) inlinePanel.hidden = bleLinked || relayJoinedMode || !!relayHostBridge?.isAtemCcuHost;
+    if (inlinePanel) inlinePanel.hidden = bleLinked || relayJoinedMode;
 
     const nativeFound = root.querySelector<HTMLElement>("[data-native-ble-found]");
     if (nativeFound) {
@@ -765,6 +788,17 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     atemCcuTcp?: boolean;
   }
 
+  /** Selected row in {@link renderRelayAtemUl} — routes CCU to a named LAN connector. */
+  let selectedAtemConnectorId: string | undefined;
+
+  interface RelayListedAtemConnector {
+    id: string;
+    name: string;
+    online: boolean;
+    tcpLinked?: boolean;
+    target?: { address: string; cameraId: number; port?: number };
+  }
+
   async function fetchRelaySessionsList(): Promise<RelayListedSession[]> {
     const res = await fetch(getRelaySessionsUrl());
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -772,6 +806,13 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       sessions?: RelayListedSession[];
     };
     return data.sessions ?? [];
+  }
+
+  async function fetchRelayAtemConnectorsList(): Promise<RelayListedAtemConnector[]> {
+    const res = await fetch(getRelayAtemConnectorsUrl());
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = (await res.json()) as { connectors?: RelayListedAtemConnector[] };
+    return data.connectors ?? [];
   }
 
   function renderRelaySessionUl(
@@ -797,6 +838,81 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       b.addEventListener("click", () => onPick(row.id));
       li.appendChild(b);
       ul.appendChild(li);
+    }
+  }
+
+  function renderRelayAtemUl(ul: HTMLUListElement | null, list: RelayListedAtemConnector[]): void {
+    if (!ul) return;
+    if (selectedAtemConnectorId && !list.some((row) => row.id === selectedAtemConnectorId)) {
+      selectedAtemConnectorId = undefined;
+    }
+    if (!selectedAtemConnectorId) {
+      selectedAtemConnectorId = list.find((row) => row.online)?.id ?? list[0]?.id;
+    }
+    ul.dataset.selectedConnector = selectedAtemConnectorId ?? "";
+    ul.innerHTML = "";
+    for (const row of list) {
+      const li = document.createElement("li");
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "relay-session-row";
+      const selected = row.id === selectedAtemConnectorId;
+      b.classList.toggle("relay-session-row--selected", selected);
+      b.setAttribute("aria-pressed", selected ? "true" : "false");
+      const on = row.online ? "●" : "○";
+      const tgt =
+        row.target?.address && row.target.cameraId !== undefined
+          ? ` · ${row.target.address} cam ${row.target.cameraId}`
+          : "";
+      const link = row.tcpLinked === true ? " · TCP✓" : row.tcpLinked === false ? " · TCP…" : "";
+      b.textContent = `${on} ${row.name}${tgt}${link}`;
+      b.title = row.id;
+      b.addEventListener("click", () => {
+        selectedAtemConnectorId = row.id;
+        ul.dataset.selectedConnector = row.id;
+        const ipEl = root.querySelector<HTMLInputElement>("[data-atem-ccu-ip]");
+        const camEl = root.querySelector<HTMLInputElement>("[data-atem-ccu-camera]");
+        if (row.target?.address && ipEl) ipEl.value = row.target.address;
+        if (row.target?.cameraId !== undefined && camEl) camEl.value = String(row.target.cameraId);
+        renderRelayAtemUl(ul, list);
+      });
+      li.appendChild(b);
+      ul.appendChild(li);
+      if (selected) {
+        const ipEl = root.querySelector<HTMLInputElement>("[data-atem-ccu-ip]");
+        const camEl = root.querySelector<HTMLInputElement>("[data-atem-ccu-camera]");
+        if (row.target?.address && ipEl && ipEl.value.trim() === "") ipEl.value = row.target.address;
+        if (row.target?.cameraId !== undefined && camEl && camEl.value.trim() === "") {
+          camEl.value = String(row.target.cameraId);
+        }
+      }
+    }
+  }
+
+  async function refreshAtemConnectorsDisplay(options: { soft?: boolean } = {}): Promise<void> {
+    const soft = options.soft ?? false;
+    const ul = root.querySelector<HTMLUListElement>("[data-relay-atem-list]");
+    const empty = root.querySelector<HTMLElement>("[data-relay-atem-empty]");
+    if (!ul || !empty) return;
+    const inlineHasRows = Boolean(ul.querySelector("li"));
+    const showSpinner = !soft || !inlineHasRows;
+    if (showSpinner) {
+      ul.innerHTML = "";
+      empty.hidden = false;
+      empty.textContent = "Loading ATEM connectors…";
+    }
+    try {
+      const list = await fetchRelayAtemConnectorsList();
+      renderRelayAtemUl(ul, list);
+      if (list.length === 0) {
+        empty.hidden = false;
+        empty.textContent =
+          "No connectors. On the LAN with the switcher, run the edge agent with CONNECTOR_NAME set.";
+      } else empty.hidden = true;
+    } catch (e) {
+      empty.hidden = false;
+      empty.textContent = `ATEM connectors: ${errorMessage(e)}`;
+      ul.innerHTML = "";
     }
   }
 
@@ -1069,6 +1185,8 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       onDropped: () => {
         relayJoinedMode = false;
         relayJoinedDisplaySessionName = undefined;
+        joinerAtemCcuActive = false;
+        joinerAtemSwitcherTcpConnected = false;
         lastRelayBanksRevisionSeen = undefined;
         joinRelAtemMixerDebugPrimed = false;
         for (const k of Object.keys(lastAtemMixerSnapshotSigByTag)) delete lastAtemMixerSnapshotSigByTag[k];
@@ -1078,6 +1196,10 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
         queueMicrotask(() => refreshControls());
         syncRelayHubButtons();
         relayJoinDropChain.handle();
+      },
+      onAtemSwitcherTcp: (detail) => {
+        joinerAtemSwitcherTcpConnected = detail.connected;
+        syncAtemLanConnectUi?.();
       },
       log,
     });
@@ -1111,6 +1233,8 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       if (relayJoinedMode) {
         relayJoinedMode = false;
         relayJoinedDisplaySessionName = undefined;
+        joinerAtemCcuActive = false;
+        joinerAtemSwitcherTcpConnected = false;
         lastRelayBanksRevisionSeen = undefined;
         joinRelAtemMixerDebugPrimed = false;
         for (const k of Object.keys(lastAtemMixerSnapshotSigByTag)) delete lastAtemMixerSnapshotSigByTag[k];
@@ -1259,6 +1383,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
 
   async function refreshRelaySessionsDisplay(options: { soft?: boolean } = {}): Promise<void> {
     const soft = options.soft ?? false;
+    void refreshAtemConnectorsDisplay({ soft });
     const ulModal = root.querySelector<HTMLUListElement>("[data-relay-session-list]");
     const ulInline = root.querySelector<HTMLUListElement>("[data-relay-session-list-inline]");
     const emptyModal = root.querySelector<HTMLElement>("[data-relay-empty]");
@@ -1332,7 +1457,8 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   }
 
   function refreshControls(): void {
-    const live = bleLinked || relayJoinedMode || !!relayHostBridge?.isAtemCcuHost;
+    const live =
+      bleLinked || relayJoinedMode || !!relayHostBridge?.isAtemCcuHost || joinerAtemCcuActive;
     setControlsEnabled(root, panelActive && live);
     root.classList.toggle("panel-inactive", !panelActive);
     const connWrap = root.querySelector(".connection-controls");
@@ -1342,7 +1468,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     const cameraIdCard = root.querySelector<HTMLElement>("[data-connect-camera-id-card]");
     if (cameraIdCard) cameraIdCard.hidden = !bleLinked;
     syncRelayHubButtons();
-    if (!bleLinked && !relayJoinedMode && !relayHostBridge?.isAtemCcuHost) {
+    if (!bleLinked && !relayJoinedMode && !joinerAtemCcuActive) {
       void refreshRelaySessionsDisplay({ soft: true });
     }
     const btn = root.querySelector<HTMLButtonElement>("[data-panel-active]");
@@ -1514,7 +1640,10 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     const addr = curModal.atemAddress.trim();
     if (relayHostBridge?.isAtemCcuHost && relayHostBridge.isActive && addr) {
       try {
-        relayHostBridge.attachAtemCcu({ address: addr, cameraId: id });
+        relayHostBridge.attachAtemCcu(
+          { address: addr, cameraId: id },
+          selectedAtemConnectorId ? { connectorId: selectedAtemConnectorId } : undefined,
+        );
       } catch (e: unknown) {
         log(`ATEM CCU: re-register camera ${id} failed: ${errorMessage(e)}`);
       }
@@ -1573,11 +1702,15 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
 
   /**
    * Relay room name for {@link performAtemLanHost} when opening a new host socket.
-   * ATEM-only hub (`atem-ccu-host`) must not inherit another camera's session name (e.g. BLE "woho")
-   * or you advertise that share name while only debugging the mixer on the Connect tab.
+   * ATEM-only hub (`atem-ccu-host`) must not inherit another camera's BLE prefs session name when
+   * you are only debugging the mixer on the Connect tab — but after **Join**, the live joined name
+   * must win over stale `atem-ccu-host` storage so `host_register` targets the same room.
    */
   function relaySessionNameForAtemLanHost(hostDeviceId: string): string {
     if (hostDeviceId === ATEM_CCU_RELAY_DEVICE_ID) {
+      if (relayJoinedMode) {
+        return effectiveAtemRelaySessionName().trim() || "ATEM CCU";
+      }
       return relayPrefsForModal(ATEM_CCU_RELAY_DEVICE_ID).sessionName.trim() || "ATEM CCU";
     }
     return effectiveAtemRelaySessionName().trim() || "ATEM CCU";
@@ -1631,6 +1764,15 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     clearAtemLanReconnectSchedule();
     atemLanReconnectAttempts = 0;
     atemLanResumeInFlight = false;
+    if (joinerAtemCcuActive && relayJoinTransport().isConnected) {
+      try {
+        relayJoinTransport().stopJoinerAtemCcu();
+      } catch {
+        /* ignore */
+      }
+      joinerAtemCcuActive = false;
+      joinerAtemSwitcherTcpConnected = false;
+    }
     clearRelayHostPanelSyncDebouncer();
     resetAtemBleMirrorBleQueue();
     for (const k of Object.keys(lastAtemMixerSnapshotSigByTag)) delete lastAtemMixerSnapshotSigByTag[k];
@@ -1654,7 +1796,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     const statusEl = root.querySelector<HTMLElement>("[data-atem-ccu-lan-status]");
     const prefs = relayPrefsForModal(ATEM_CCU_RELAY_DEVICE_ID);
     const wsOk = typeof WebSocket !== "undefined";
-    const atemLive = !!relayHostBridge?.isAtemCcuHost;
+    const atemLive = !!relayHostBridge?.isAtemCcuHost || joinerAtemCcuActive;
     const persistHostIntent = readAtemLanPersistIntent() && !atemLive && wsOk;
     const atemLanConnectInProgress = atemLanResumeInFlight && !atemLive && wsOk;
 
@@ -1683,10 +1825,19 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
         const cam = Number.isFinite(Number(camEl?.value))
           ? clampAtemCameraId(Number(camEl!.value))
           : prefs.atemCameraId;
-        const tcpOk = relayHostBridge?.atemSwitcherTcpConnected ?? false;
-        statusEl.textContent = tcpOk
-          ? `Connected to ATEM at ${ip} (camera ${cam}). Tap Disconnect to stop hosting.`
-          : `Relay session live — camera-control TCP to ${ip} (camera ${cam}) is down for this session; retrying about every 10s. (ATEM Software Control can still be connected.)`;
+        const tcpOk = joinerAtemCcuActive
+          ? joinerAtemSwitcherTcpConnected
+          : relayHostBridge?.atemSwitcherTcpConnected ?? false;
+        if (tcpOk) {
+          statusEl.textContent = `Connected to ATEM at ${ip} (camera ${cam}). Tap Disconnect to stop hosting.`;
+        } else {
+          let msg = `Relay session live — camera-control TCP to ${ip} (camera ${cam}) is down for this session; retrying about every 10s. (ATEM Software Control can still be connected.)`;
+          if (isRelayHubRemoteDeployment() && atemTargetLooksUnreachableFromRemoteHub(ip)) {
+            msg +=
+              " The relay hub runs on the server — it cannot open TCP to a private LAN address unless that Node process is on the same network as the switcher (local relay / ENVIRONMENT=LOCAL).";
+          }
+          statusEl.textContent = msg;
+        }
       } else if (atemLanConnectInProgress) {
         statusEl.hidden = false;
         const ip = ipEl?.value.trim() ?? prefs.atemAddress;
@@ -1705,7 +1856,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   async function startRelayHosting(
     sessionName: string,
     deviceId: string,
-    options?: { atemCcu?: AtemCcuRelayRegister },
+    options?: { atemCcu?: AtemCcuRelayRegister; connectorId?: string },
   ): Promise<void> {
     const prev = relayHostBridge;
     if (prev) {
@@ -1785,7 +1936,12 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
         if (readAtemLanPersistIntent()) scheduleAtemLanFullReconnect("relay socket closed");
       },
     });
-    await relayHostBridge.connect(sessionName, deviceId, options?.atemCcu);
+    const connectorId = options?.connectorId?.trim();
+    const initialAtemHost = options?.atemCcu && !connectorId ? options.atemCcu : undefined;
+    await relayHostBridge.connect(sessionName, deviceId, initialAtemHost);
+    if (options?.atemCcu && connectorId) {
+      relayHostBridge.attachAtemCcu(options.atemCcu, { connectorId });
+    }
     if (options?.atemCcu) {
       enableAtemMixerDebugDefaults();
       log("ATEM CCU: compact debug trace on — watch for [ccu h] lines in this log.");
@@ -1816,6 +1972,48 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
         ? activeDeviceId
         : ATEM_CCU_RELAY_DEVICE_ID;
 
+    if (relayJoinedMode && relayJoinTransport().isConnected) {
+      const sessionName = effectiveAtemRelaySessionName().trim() || "relay";
+      const banksId = activeDeviceId ?? ATEM_CCU_RELAY_DEVICE_ID;
+      writeRelayPrefs(ATEM_CCU_RELAY_DEVICE_ID, {
+        sessionName,
+        share: true,
+        atemCcu: true,
+        atemAddress: trimmed,
+        atemCameraId: cameraId,
+      });
+      writeAtemLanPersistIntent(false);
+      joinerAtemSwitcherTcpConnected = false;
+      atemLanResumeInFlight = true;
+      syncAtemLanConnectUi?.();
+      try {
+        relayJoinTransport().registerJoinerAtemCcu(
+          { address: trimmed, cameraId },
+          selectedAtemConnectorId,
+        );
+        joinerAtemCcuActive = true;
+        enableAtemMixerDebugDefaults();
+        log("ATEM CCU: compact debug trace on — watch for [ccu h] lines in this log.");
+        await loadBanksFor(banksId);
+        void banksApi
+          .saveAtemCcuRelay(banksId, { address: trimmed, cameraId, sessionName })
+          .catch((err: unknown) => log(`ATEM relay prefs save failed: ${errorMessage(err)}`));
+        refreshControls();
+        log(`ATEM CCU: relay session "${sessionName}" (joined room) → ${trimmed} (camera ${cameraId})`);
+        clearAtemLanReconnectSchedule();
+        atemLanReconnectAttempts = 0;
+        return true;
+      } catch (e: unknown) {
+        joinerAtemCcuActive = false;
+        joinerAtemSwitcherTcpConnected = false;
+        log(`ATEM connect failed: ${errorMessage(e)}`);
+        return false;
+      } finally {
+        atemLanResumeInFlight = false;
+        syncAtemLanConnectUi?.();
+      }
+    }
+
     if (br?.isActive && !br.isAtemCcuHost && bleLinked) {
       const sessionName = effectiveAtemRelaySessionName().trim() || "ATEM CCU";
       writeRelayPrefs(ATEM_CCU_RELAY_DEVICE_ID, {
@@ -1840,7 +2038,10 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       atemLanResumeInFlight = true;
       syncAtemLanConnectUi?.();
       try {
-        br.attachAtemCcu({ address: trimmed, cameraId });
+        br.attachAtemCcu(
+          { address: trimmed, cameraId },
+          selectedAtemConnectorId ? { connectorId: selectedAtemConnectorId } : undefined,
+        );
         await loadBanksFor(banksPersist);
         void banksApi
           .saveAtemCcuRelay(banksPersist, { address: trimmed, cameraId, sessionName })
@@ -1895,6 +2096,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     try {
       await startRelayHosting(sessionName, hostDeviceId, {
         atemCcu: { address: trimmed, cameraId },
+        connectorId: selectedAtemConnectorId,
       });
       await loadBanksFor(hostDeviceId);
       void banksApi
@@ -1975,6 +2177,27 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
 
   function stopAtemRelayHosting(): void {
     writeAtemLanPersistIntent(false);
+    if (joinerAtemCcuActive) {
+      try {
+        relayJoinTransport().stopJoinerAtemCcu();
+      } catch {
+        /* ignore */
+      }
+      joinerAtemCcuActive = false;
+      joinerAtemSwitcherTcpConnected = false;
+      const prefs = relayPrefsForModal(ATEM_CCU_RELAY_DEVICE_ID);
+      writeRelayPrefs(ATEM_CCU_RELAY_DEVICE_ID, {
+        sessionName: prefs.sessionName,
+        share: prefs.share,
+        atemCcu: false,
+        atemAddress: prefs.atemAddress,
+        atemCameraId: prefs.atemCameraId,
+      });
+      refreshControls();
+      syncAtemLanConnectUi?.();
+      log("ATEM CCU: disconnected from joined relay session");
+      return;
+    }
     const prefs = relayPrefsForModal(ATEM_CCU_RELAY_DEVICE_ID);
     writeRelayPrefs(ATEM_CCU_RELAY_DEVICE_ID, {
       sessionName: prefs.sessionName,
@@ -2007,7 +2230,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   }
 
   bind(root, "[data-atem-ccu-lan-connect]", "click", () => {
-    if (relayHostBridge?.isAtemCcuHost || readAtemLanPersistIntent()) {
+    if (relayHostBridge?.isAtemCcuHost || joinerAtemCcuActive || readAtemLanPersistIntent()) {
       stopAtemRelayHosting();
       return;
     }
@@ -2022,7 +2245,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   });
 
   bind(root, "[data-atem-ccu-ip]", "change", () => {
-    if (relayHostBridge?.isAtemCcuHost) return;
+    if (relayHostBridge?.isAtemCcuHost || joinerAtemCcuActive) return;
     const ipEl = root.querySelector<HTMLInputElement>("[data-atem-ccu-ip]");
     const camEl = root.querySelector<HTMLInputElement>("[data-atem-ccu-camera]");
     const addr = ipEl?.value.trim() ?? "";
@@ -2046,14 +2269,14 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
             (addrChanged ? state.current.cameraNumber : p.atemCameraId) ?? p.atemCameraId ?? 1,
           ));
     writeRelayPrefs(ATEM_CCU_RELAY_DEVICE_ID, { ...p, atemAddress: addr, atemCameraId: camHint });
-    if (camEl && !relayHostBridge?.isAtemCcuHost) {
+    if (camEl && !relayHostBridge?.isAtemCcuHost && !joinerAtemCcuActive) {
       camEl.value = String(camHint);
     }
     syncAtemLanConnectUi?.();
   });
 
   function persistAtemLanCameraFieldFromInput(): void {
-    if (relayHostBridge?.isAtemCcuHost) return;
+    if (relayHostBridge?.isAtemCcuHost || joinerAtemCcuActive) return;
     const camEl = root.querySelector<HTMLInputElement>("[data-atem-ccu-camera]");
     const ipEl = root.querySelector<HTMLInputElement>("[data-atem-ccu-ip]");
     const camStr = camEl?.value.trim() ?? "";
@@ -2251,8 +2474,8 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       log("Left remote session");
       return;
     }
-    if (relayHostBridge?.isActive) {
-      log("Stop sharing (Bluetooth or ATEM CCU) before joining remotely");
+    if (relayHostBridge?.isActive && !relayHostBridge.isAtemCcuHost) {
+      log("Stop sharing Bluetooth before joining remotely");
       return;
     }
     const backdrop = root.querySelector<HTMLElement>("[data-relay-list-modal]");
@@ -2324,13 +2547,87 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     void refreshRelaySessionsDisplay({ soft: true });
   }, 14000);
 
-  document.addEventListener("visibilitychange", () => {
+  let hadLiveLinkWhenBackgrounded = false;
+  let foregroundRecoverInFlight = false;
+
+  function noteBackgroundIfNeeded(): void {
+    if (document.visibilityState !== "hidden") return;
+    hadLiveLinkWhenBackgrounded =
+      bleLinked || relayJoinedMode || Boolean(relayHostBridge?.isActive) || joinerAtemCcuActive;
+  }
+
+  async function recoverLinksAfterForeground(): Promise<void> {
+    if (foregroundRecoverInFlight) return;
+    if (!hadLiveLinkWhenBackgrounded) return;
+    foregroundRecoverInFlight = true;
+    try {
+      if (
+        !relayJoinedMode &&
+        !bleLinked &&
+        !relayHostBridge?.isActive &&
+        joinAutoReconnect &&
+        lastRelayJoinSessionId
+      ) {
+        log(`App resumed: restoring relay session ${lastRelayJoinSessionId.slice(0, 8)}…`);
+        await finalizeRelayJoin(lastRelayJoinSessionId);
+      }
+
+      if (
+        !bleLinked &&
+        !relayJoinedMode &&
+        !relayHostBridge?.isActive &&
+        rawClient instanceof NativeBleCameraClient &&
+        rawClient.autoReconnectEnabled
+      ) {
+        const snap = readLastNativeBleSnapshot();
+        if (snap?.peripheralId) {
+          log("App resumed: restoring Bluetooth camera…");
+          const info = await rawClient.connectToScannedDevice(snap.peripheralId, snap.nameHint);
+          state.setDeviceName(info.deviceName);
+          setConnection(root, "", info.deviceName);
+          bleLinked = true;
+          refreshControls();
+          void loadBanksFor(info.deviceId);
+          log(`Connected: ${info.deviceName}`);
+          void maybeOfferRelayHosting(info.deviceId);
+          viewController.onConnected();
+        }
+      }
+
+      if (readAtemLanPersistIntent()) {
+        await tryAtemCcuAutoReconnect();
+      }
+    } catch (error) {
+      log(`Foreground reconnect failed: ${errorMessage(error)}`);
+    } finally {
+      hadLiveLinkWhenBackgrounded = false;
+      foregroundRecoverInFlight = false;
+    }
+  }
+
+  function refreshRelayListOnForeground(): void {
     if (document.visibilityState !== "visible") return;
     const main = root.querySelector<HTMLElement>(".panel-app");
     if (main?.dataset.viewActive !== "connect") return;
     const panel = root.querySelector<HTMLElement>("[data-relay-sessions-inline]");
     if (!panel || panel.hidden) return;
     void refreshRelaySessionsDisplay({ soft: true });
+  }
+
+  document.addEventListener("visibilitychange", () => {
+    noteBackgroundIfNeeded();
+    refreshRelayListOnForeground();
+    void recoverLinksAfterForeground();
+  });
+
+  globalThis.addEventListener("pageshow", () => {
+    refreshRelayListOnForeground();
+    void recoverLinksAfterForeground();
+  });
+
+  globalThis.addEventListener("focus", () => {
+    refreshRelayListOnForeground();
+    void recoverLinksAfterForeground();
   });
 
   let prevSnapshot: CameraSnapshot | null = null;
@@ -2929,16 +3226,21 @@ function bindMasterBlackKnob(
   const knob = root.querySelector<HTMLElement>("[data-iris-wheel]");
   if (!knob) return;
 
-  const SENSITIVITY_DEG_PER_FULL_RANGE = 270;
-  const minSendIntervalMs = 80;
+  /** Same feel as Color paint knobs: this vertical travel (px) sweeps full master-black span. */
+  const VERTICAL_DRAG_PX_FOR_FULL_SPAN = 180;
+  const minSendIntervalMs = BLE_POINTER_DRAG_SEND_INTERVAL_MS;
+  const mbSpan = MASTER_BLACK_RANGE.max - MASTER_BLACK_RANGE.min;
 
   let dragging = false;
   let pointerId: number | null = null;
-  let startAngle = 0;
-  let startNorm = 0.5;
+  let startClientY = 0;
+  let startValue = 0;
   let pendingValue: number | null = null;
   let lastSent = 0;
   let scheduled: number | null = null;
+
+  const clampMb = (v: number): number =>
+    Math.max(MASTER_BLACK_RANGE.min, Math.min(MASTER_BLACK_RANGE.max, v));
 
   const flush = (force: boolean): void => {
     if (pendingValue === null) return;
@@ -2959,25 +3261,20 @@ function bindMasterBlackKnob(
     void send(commands.masterBlack(value), `Master black ${value >= 0 ? "+" : ""}${value.toFixed(2)}`);
   };
 
+  const updateVisuals = (value: number): void => {
+    const angleDeg = masterBlackToNormalised(value) * 270 - 135;
+    knob.style.setProperty("--angle", `${angleDeg}deg`);
+    knob.setAttribute("aria-valuenow", value.toFixed(2));
+  };
+
   const onPointerMove = (event: PointerEvent): void => {
     if (!dragging || pointerId !== event.pointerId) return;
     event.preventDefault();
 
-    const rect = knob.getBoundingClientRect();
-    const cx = rect.left + rect.width / 2;
-    const cy = rect.top + rect.height / 2;
-    const angle = (Math.atan2(event.clientY - cy, event.clientX - cx) * 180) / Math.PI;
-    let delta = angle - startAngle;
-    if (delta > 180) delta -= 360;
-    if (delta < -180) delta += 360;
-
-    const nextNorm = Math.max(0, Math.min(1, startNorm + delta / SENSITIVITY_DEG_PER_FULL_RANGE));
-    const nextValue = normalisedToMasterBlack(nextNorm);
-    pendingValue = Math.max(MASTER_BLACK_RANGE.min, Math.min(MASTER_BLACK_RANGE.max, Number(nextValue.toFixed(2))));
-
-    const angleDeg = masterBlackToNormalised(pendingValue) * 270 - 135;
-    knob.style.setProperty("--angle", `${angleDeg}deg`);
-
+    const deltaY = startClientY - event.clientY;
+    const next = clampMb(startValue + (deltaY / VERTICAL_DRAG_PX_FOR_FULL_SPAN) * mbSpan);
+    pendingValue = Number(next.toFixed(2));
+    updateVisuals(pendingValue);
     flush(false);
   };
 
@@ -2991,23 +3288,21 @@ function bindMasterBlackKnob(
   };
 
   knob.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
     event.preventDefault();
     dragging = true;
     pointerId = event.pointerId;
     knob.setPointerCapture(event.pointerId);
 
-    const rect = knob.getBoundingClientRect();
-    const cx = rect.left + rect.width / 2;
-    const cy = rect.top + rect.height / 2;
-    startAngle = (Math.atan2(event.clientY - cy, event.clientX - cx) * 180) / Math.PI;
-    startNorm = masterBlackToNormalised(state.current.color.lift.luma ?? 0);
+    startClientY = event.clientY;
+    startValue = clampMb(state.current.color.lift.luma ?? 0);
   });
 
   knob.addEventListener("pointermove", onPointerMove);
   knob.addEventListener("pointerup", stopDrag);
   knob.addEventListener("pointercancel", stopDrag);
   knob.style.touchAction = "none";
-  knob.style.cursor = "grab";
+  knob.style.cursor = "ns-resize";
 }
 
 const FOCUS_ACTIVE_STORAGE_KEY = "bm-iris-focus-active";
@@ -3895,11 +4190,14 @@ function bindStepper(
   id: string,
   handler: (direction: StepDirection) => Promise<void> | void,
 ): void {
-  const upButton = root.querySelector<HTMLButtonElement>(`[data-stepper-up="${id}"]`);
-  const downButton = root.querySelector<HTMLButtonElement>(`[data-stepper-down="${id}"]`);
-
-  upButton?.addEventListener("click", () => void handler(1));
-  downButton?.addEventListener("click", () => void handler(-1));
+  const upButtons = root.querySelectorAll<HTMLButtonElement>(`[data-stepper-up="${id}"]`);
+  const downButtons = root.querySelectorAll<HTMLButtonElement>(`[data-stepper-down="${id}"]`);
+  for (const upButton of upButtons) {
+    upButton.addEventListener("click", () => void handler(1));
+  }
+  for (const downButton of downButtons) {
+    downButton.addEventListener("click", () => void handler(-1));
+  }
 }
 
 const ISO_LADDER = [100, 125, 160, 200, 250, 320, 400, 500, 640, 800, 1000, 1250, 1600, 2000, 2500, 3200, 4000, 5000, 6400, 8000, 12800, 25600];
@@ -3970,12 +4268,13 @@ function pulseChangedControls(
   if (!prev) return;
   for (const target of PULSE_TARGETS) {
     if (!target.changed(prev, next)) continue;
-    const el = root.querySelector<HTMLElement>(target.selector);
-    if (!el) continue;
-    el.classList.remove("pulse");
-    void el.offsetWidth;
-    el.classList.add("pulse");
-    window.setTimeout(() => el.classList.remove("pulse"), 700);
+    const elements = root.querySelectorAll<HTMLElement>(target.selector);
+    for (const el of elements) {
+      el.classList.remove("pulse");
+      void el.offsetWidth;
+      el.classList.add("pulse");
+      window.setTimeout(() => el.classList.remove("pulse"), 700);
+    }
   }
 }
 

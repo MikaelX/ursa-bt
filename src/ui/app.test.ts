@@ -283,8 +283,8 @@ describe("createApp", () => {
     knob.setPointerCapture = () => undefined;
     knob.releasePointerCapture = () => undefined;
 
-    knob.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 1, clientX: 80, clientY: 40, bubbles: true }));
-    knob.dispatchEvent(new PointerEvent("pointermove", { pointerId: 1, clientX: 40, clientY: 80, bubbles: true }));
+    knob.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 1, clientX: 40, clientY: 100, bubbles: true }));
+    knob.dispatchEvent(new PointerEvent("pointermove", { pointerId: 1, clientX: 40, clientY: 20, bubbles: true }));
     knob.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1, clientX: 40, clientY: 80, bubbles: true }));
 
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -742,11 +742,20 @@ describe("relay sessions list", () => {
   it("shows hosted sessions on Connect without opening Join modal", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({
-          sessions: [{ id: "sid-aa", name: "Wireless LAN", deviceId: "camera-a" }],
-        }),
+      vi.fn().mockImplementation(async (url: RequestInfo) => {
+        const u = String(url);
+        if (u.includes("/api/relay/atem-connectors")) {
+          return {
+            ok: true,
+            json: async () => ({ connectors: [] }),
+          };
+        }
+        return {
+          ok: true,
+          json: async () => ({
+            sessions: [{ id: "sid-aa", name: "Wireless LAN", deviceId: "camera-a" }],
+          }),
+        };
       }),
     );
     const r = document.createElement("div");
@@ -754,8 +763,9 @@ describe("relay sessions list", () => {
     await flushPromises();
     await flushPromises();
     expect(globalThis.fetch).toHaveBeenCalled();
-    const firstReq = vi.mocked(globalThis.fetch).mock.calls[0]?.[0];
-    expect(String(firstReq)).toContain("/api/relay/sessions");
+    const urls = vi.mocked(globalThis.fetch).mock.calls.map((c) => String(c[0]));
+    expect(urls.some((u) => u.includes("/api/relay/sessions"))).toBe(true);
+    expect(urls.some((u) => u.includes("/api/relay/atem-connectors"))).toBe(true);
     expect(r.querySelector("[data-relay-session-list-inline] .relay-session-row")?.textContent).toContain(
       "Wireless LAN",
     );

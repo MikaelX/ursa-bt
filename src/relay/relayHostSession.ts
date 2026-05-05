@@ -33,11 +33,17 @@ type WireOut =
       deviceId: string;
       atemCcu?: AtemCcuRelayRegister;
     }
-  | { type: "host_atem_ccu_register"; atemCcu: AtemCcuRelayRegister }
+  | ({ type: "host_atem_ccu_register"; atemCcu: AtemCcuRelayRegister } & { connectorId?: string })
   | { type: "host_atem_ccu_stop" }
   | { type: "host_stop" }
   | { type: "host_ping" }
-  | { type: "panel_sync"; snapshot: Record<string, unknown> };
+  | { type: "panel_sync"; snapshot: Record<string, unknown> }
+  | ({
+      type: "atem_edge_control";
+      sessionId: string;
+      command: "connect" | "disconnect" | "restart";
+      atemCcu?: AtemCcuRelayRegister;
+    } & { connectorId?: string })
 
 function hexEncode(bytes: Uint8Array): string {
   return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -102,13 +108,63 @@ export class RelayHostSession {
     return this.ble === nullBleCameraClient;
   }
 
-  /** Add or replace the hub ATEM bridge on the **current** hosted session (same `sessionId` as BLE share). */
-  attachAtemCcu(atem: AtemCcuRelayRegister): void {
+  /** When {@link opts}.`connectorId` is set, CCU TCP runs on that named LAN connector (see `/api/relay/atem-connectors`). */
+  attachAtemCcu(atem: AtemCcuRelayRegister, opts?: { connectorId?: string }): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.sessionId) {
       throw new Error("Relay host socket is not ready");
     }
     this.atemCcuConfig = atem;
-    this.ws.send(JSON.stringify({ type: "host_atem_ccu_register", atemCcu: atem } satisfies WireOut));
+    const connectorId = opts?.connectorId?.trim();
+    this.ws.send(
+      JSON.stringify(
+        connectorId
+          ? { type: "host_atem_ccu_register", atemCcu: atem, connectorId }
+          : { type: "host_atem_ccu_register", atemCcu: atem },
+      ),
+    );
+  }
+
+  /** Host UI → LAN edge agent (`atem_edge_control`), when hub TCP is edge-only (`RELAY_ATEM_HUB_BRIDGE=0`). */
+  sendAtemEdgeControl(
+    command: "connect" | "disconnect" | "restart",
+    atemCcu?: AtemCcuRelayRegister,
+    opts?: { connectorId?: string },
+  ): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.sessionId) {
+      throw new Error("Relay host socket is not ready");
+    }
+    const cid = opts?.connectorId?.trim();
+    if (command === "connect") {
+      if (!atemCcu?.address?.trim() || !Number.isFinite(atemCcu.cameraId)) {
+        throw new Error("connect requires atemCcu address and cameraId");
+      }
+      this.ws.send(
+        JSON.stringify(
+          cid
+            ? {
+                type: "atem_edge_control",
+                sessionId: this.sessionId,
+                command: "connect",
+                atemCcu,
+                connectorId: cid,
+              }
+            : {
+                type: "atem_edge_control",
+                sessionId: this.sessionId,
+                command: "connect",
+                atemCcu,
+              },
+        ),
+      );
+      return;
+    }
+    this.ws.send(
+      JSON.stringify(
+        cid
+          ? { type: "atem_edge_control", sessionId: this.sessionId, command, connectorId: cid }
+          : { type: "atem_edge_control", sessionId: this.sessionId, command },
+      ),
+    );
   }
 
   /** Tear down hub ATEM bridge only; BLE relay session stays up. */
@@ -274,6 +330,18 @@ export class RelayHostSession {
     if (t === "hosted") {
       const sid = (parsed as { sessionId?: string }).sessionId;
       if (typeof sid === "string") this.sessionId = sid;
+      const planeSid = (parsed as { atemPlaneSessionId?: string }).atemPlaneSessionId;
+      if (typeof planeSid === "string" && planeSid.length > 0) {
+        this.params.log(
+          `Relay ATEM control plane session id: ${planeSid} — LAN agent: RELAY_URL=<relay ws> SESSION_ID=${planeSid} EDGE_TOKEN=<RELAY_ATEM_PLANE_EDGE_TOKEN>`,
+        );
+      }
+      const edgeTok = (parsed as { edgeToken?: string }).edgeToken;
+      if (typeof edgeTok === "string" && edgeTok.length > 0) {
+        this.params.log(
+          `Relay ATEM edge token (LAN agent): ${edgeTok} — run: RELAY_URL=<relay ws> SESSION_ID=${sid ?? "?"} EDGE_TOKEN=${edgeTok} npm run atem:edge-agent`,
+        );
+      }
       const ext = this as RelayHostSession & { _onHosted?: () => void };
       ext._onHosted?.();
       ext._onHosted = undefined;

@@ -506,6 +506,15 @@ button.bluefy-modal-dismiss {
   transform: translateY(1px);
 }
 
+.relay-session-row--selected {
+  border-color: rgba(124, 252, 74, 0.75);
+  background: rgba(124, 252, 74, 0.13);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 0 0 1px rgba(124, 252, 74, 0.22),
+    0 0 10px rgba(124, 252, 74, 0.35);
+}
+
 .relay-sessions-inline {
   margin-top: 0.85rem;
   padding-top: 0.85rem;
@@ -3514,18 +3523,35 @@ button.bluefy-modal-dismiss {
   padding: 0.12rem 0.12rem;
 }
 
-/* Secondary row: master black only */
+/* Secondary row: master gain (settings-style stepper) + master black */
 .iris-secondary {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.48rem;
-  justify-items: center;
+  justify-items: stretch;
   align-items: stretch;
+  width: 100%;
+  max-width: min(44rem, 100%);
+  margin-inline: auto;
+}
+
+.iris-secondary-exposure {
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+}
+
+.iris-secondary-exposure .stepper-cell {
+  flex: 1 1 auto;
+  width: 100%;
+  background: #15171a;
+  border-color: var(--chassis-border);
+  border-radius: 0.65rem;
 }
 
 .iris-secondary .iris-mb-cell {
   width: 100%;
-  max-width: min(22rem, 100%);
+  max-width: none;
 }
 
 /* Master black pot — slightly tighter than before */
@@ -3818,8 +3844,8 @@ button.bluefy-modal-dismiss {
     line-height: 1;
   }
 
-  .iris-secondary .iris-mb-cell {
-    max-width: min(20rem, 100%);
+  .iris-secondary {
+    max-width: min(40rem, 100%);
   }
 }
 
@@ -3857,9 +3883,6 @@ button.bluefy-modal-dismiss {
   .iris-joystick--xl .bm-tbar__handle {
     --handle-h: 26px;
     --handle-w: min(68px, 100%);
-  }
-  .iris-secondary .iris-mb-cell {
-    max-width: min(18rem, 100%);
   }
   .iris-mb-cell {
     grid-template-columns: auto 1fr;
@@ -3940,6 +3963,16 @@ button.bluefy-modal-dismiss {
     gap: 0.24rem 0.2rem;
   }
   .view--iris .iris-side-buttons .side-btn { font-size: 0.52rem; padding: 0.28rem 0.14rem; line-height: 1; }
+  .iris-secondary {
+    grid-template-columns: 1fr;
+    gap: 0.35rem;
+  }
+  .iris-secondary-exposure .stepper-cell {
+    padding: 0.4rem 0.45rem 0.32rem;
+  }
+  .iris-secondary-exposure .app-bm-seg-readout.stepper-segment .bm-seg__digit {
+    --digit-size: 1.12rem;
+  }
 }
 
 /* Mobile exposure view: tighter pads on steppers + key grid */
@@ -4099,10 +4132,9 @@ button.bluefy-modal-dismiss {
     gap: 0.32rem;
   }
 
-  /* Iris secondary: master black only */
+  /* Iris secondary: gain stepper + master black */
   .view--iris .iris-secondary {
-    grid-template-columns: minmax(0, 1fr);
-    justify-items: center;
+    max-width: min(48rem, 100%);
   }
 
   .iris-joystick--xl.app-bm-iris-tbar.bm-tbar {
