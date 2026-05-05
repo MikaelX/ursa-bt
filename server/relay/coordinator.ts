@@ -17,6 +17,7 @@ import { AtemCcuRoomBridge } from "../atem/atemCcuRoomBridge.js";
 const RELAY_PATH = "/api/relay/socket";
 
 const REDIS_PREFIX_SESSION = "bmrelay:s:";
+const REDIS_PREFIX_CONNECTOR = "bmrelay:c:";
 const REDIS_TTL_SEC = 120;
 
 /** JSON sent over WebSocket (host <-> server <-> joiners). */
@@ -194,6 +195,8 @@ export class RelayCoordinator {
   private readonly atemConnectors = new Map<string, AtemConnector>();
   /** Operator session id → connector id for CCU fan-out and `forward_cmd`. */
   private readonly sessionAtemConnector = new Map<string, string>();
+  /** Redis presence heartbeat timers for connector keys (`bmrelay:c:*`). */
+  private readonly connectorPresenceTimers = new Map<string, ReturnType<typeof setInterval>>();
   /** When set, `ensureRedis` skips new attempts until the clock passes this (retry after transient failure / boot race). */
   private redisRetryNotBeforeMs = 0;
 
@@ -357,15 +360,77 @@ export class RelayCoordinator {
       target?: { address: string; cameraId: number; port?: number };
     }[]
   > {
-    return [...this.atemConnectors.values()]
-      .map((c) => ({
+    const outById = new Map<
+      string,
+      {
+        id: string;
+        name: string;
+        online: boolean;
+        tcpLinked?: boolean;
+        target?: { address: string; cameraId: number; port?: number };
+      }
+    >();
+
+    for (const c of this.atemConnectors.values()) {
+      outById.set(c.id, {
         id: c.id,
         name: c.name,
         online: c.socket?.readyState === 1,
         tcpLinked: c.tcpLinked,
         target: c.target,
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name));
+      });
+    }
+
+    await this.ensureRedis();
+    if (this.redis) {
+      const keys = await this.redis.pub.keys(`${REDIS_PREFIX_CONNECTOR}*`);
+      for (const key of keys) {
+        const id = key.slice(REDIS_PREFIX_CONNECTOR.length);
+        if (!id) continue;
+        const h = await this.redis.pub.hgetall(key);
+        const name = (h.name ?? "").trim();
+        if (!name) continue;
+        const recOnline = h.online === "1";
+        let recTcpLinked: boolean | undefined;
+        if (h.tcpLinked === "1") recTcpLinked = true;
+        else if (h.tcpLinked === "0") recTcpLinked = false;
+        const recAddress = (h.targetAddress ?? "").trim();
+        const recCameraId = Number(h.targetCameraId ?? "");
+        const recPort = Number(h.targetPort ?? "");
+        const recTarget =
+          recAddress && Number.isFinite(recCameraId)
+            ? {
+                address: recAddress,
+                cameraId: Math.round(recCameraId),
+                ...(Number.isFinite(recPort) ? { port: Math.round(recPort) } : {}),
+              }
+            : undefined;
+        const prev = outById.get(id);
+        if (!prev) {
+          outById.set(id, {
+            id,
+            name,
+            online: recOnline,
+            ...(recTcpLinked !== undefined ? { tcpLinked: recTcpLinked } : {}),
+            ...(recTarget ? { target: recTarget } : {}),
+          });
+          continue;
+        }
+        outById.set(id, {
+          ...prev,
+          name: prev.name || name,
+          online: prev.online || recOnline,
+          ...(prev.tcpLinked !== undefined
+            ? { tcpLinked: prev.tcpLinked }
+            : recTcpLinked !== undefined
+              ? { tcpLinked: recTcpLinked }
+              : {}),
+          ...(prev.target ? { target: prev.target } : recTarget ? { target: recTarget } : {}),
+        });
+      }
+    }
+
+    return [...outById.values()].sort((a, b) => a.name.localeCompare(b.name));
   }
 
   private routeForwardCmdToAtemEdge(room: Room, hex: string): void {
@@ -451,6 +516,8 @@ export class RelayCoordinator {
   }
 
   async destroy(): Promise<void> {
+    for (const timer of this.connectorPresenceTimers.values()) clearInterval(timer);
+    this.connectorPresenceTimers.clear();
     await this.closeRedis();
     await new Promise<void>((resolve) => this.wss.close(() => resolve()));
   }
@@ -477,6 +544,8 @@ export class RelayCoordinator {
       const Redis = (await import("ioredis")).default;
       pub = new Redis(this.redisUrl);
       sub = new Redis(this.redisUrl);
+      const pubClient = pub;
+      const subClient = sub;
       await new Promise<void>((resolve, reject) => {
         let left = 2;
         const to = setTimeout(() => reject(new Error("Redis connect timeout")), 12_000);
@@ -487,19 +556,19 @@ export class RelayCoordinator {
             resolve();
           }
         };
-        pub.once("ready", done);
-        sub.once("ready", done);
+        pubClient.once("ready", done);
+        subClient.once("ready", done);
       });
-      await sub.psubscribe("bmrelay:in:*");
-      await sub.psubscribe("bmrelay:out:*");
-      sub.on("pmessage", (_pattern: string, channel: string, msg: string) => {
+      await subClient.psubscribe("bmrelay:in:*");
+      await subClient.psubscribe("bmrelay:out:*");
+      subClient.on("pmessage", (_pattern: string, channel: string, msg: string) => {
         const [, dir, ...restSid] = channel.split(":");
         const sessionId = restSid.join(":");
         if (!sessionId) return;
         if (dir === "in") this.deliverToLocalHost(sessionId, msg);
         else if (dir === "out") this.deliverToLocalJoiners(sessionId, msg);
       });
-      this.redis = { pub, sub };
+      this.redis = { pub: pubClient, sub: subClient };
       this.redisRetryNotBeforeMs = 0;
       console.log("[relay] Redis pub/sub enabled");
     } catch (e) {
@@ -526,6 +595,53 @@ export class RelayCoordinator {
     await r.sub.quit();
     await r.pub.quit();
     this.redis = undefined;
+  }
+
+  private startConnectorPresence(connectorId: string): void {
+    this.stopConnectorPresence(connectorId);
+    const timer = setInterval(() => {
+      const conn = this.atemConnectors.get(connectorId);
+      if (!conn || !conn.socket || conn.socket.readyState !== 1) {
+        this.stopConnectorPresence(connectorId);
+        return;
+      }
+      void this.refreshConnectorRedisMeta(connectorId);
+    }, 15_000);
+    this.connectorPresenceTimers.set(connectorId, timer);
+  }
+
+  private stopConnectorPresence(connectorId: string): void {
+    const t = this.connectorPresenceTimers.get(connectorId);
+    if (t !== undefined) clearInterval(t);
+    this.connectorPresenceTimers.delete(connectorId);
+  }
+
+  private async refreshConnectorRedisMeta(connectorId: string): Promise<void> {
+    await this.ensureRedis();
+    if (!this.redis) return;
+    const conn = this.atemConnectors.get(connectorId);
+    if (!conn) return;
+    const key = `${REDIS_PREFIX_CONNECTOR}${connectorId}`;
+    const online = conn.socket?.readyState === 1 ? "1" : "0";
+    const multi = this.redis.pub.multi();
+    multi.hset(key, "name", conn.name, "online", online);
+    if (conn.tcpLinked === true) multi.hset(key, "tcpLinked", "1");
+    else if (conn.tcpLinked === false) multi.hset(key, "tcpLinked", "0");
+    else multi.hdel(key, "tcpLinked");
+    if (conn.target) {
+      multi.hset(key, "targetAddress", conn.target.address, "targetCameraId", String(conn.target.cameraId));
+      if (conn.target.port !== undefined) multi.hset(key, "targetPort", String(conn.target.port));
+      else multi.hdel(key, "targetPort");
+    } else {
+      multi.hdel(key, "targetAddress", "targetCameraId", "targetPort");
+    }
+    await multi.expire(key, REDIS_TTL_SEC).exec();
+  }
+
+  private async deleteConnectorRedisMeta(connectorId: string): Promise<void> {
+    await this.ensureRedis();
+    if (!this.redis) return;
+    await this.redis.pub.del(`${REDIS_PREFIX_CONNECTOR}${connectorId}`);
   }
 
   private disposeAtemBridge(room: Room): void {
@@ -626,9 +742,15 @@ export class RelayCoordinator {
       if (!atemConnectorRoleId) return;
       const cid = atemConnectorRoleId;
       const c = this.atemConnectors.get(cid);
+      let released = false;
       if (c?.socket === ws) {
         c.socket = undefined;
         c.tcpLinked = undefined;
+        released = true;
+      }
+      if (released) {
+        this.stopConnectorPresence(cid);
+        void this.deleteConnectorRedisMeta(cid).catch(() => {});
       }
       atemConnectorRoleId = undefined;
       if (this.sessionsUsingConnector(cid) > 0) {
@@ -720,6 +842,7 @@ export class RelayCoordinator {
             const conn = this.atemConnectors.get(connectorUplinkId);
             if (conn) {
               conn.tcpLinked = Boolean((parsed as { connected?: unknown }).connected);
+              void this.refreshConnectorRedisMeta(connectorUplinkId).catch(() => {});
             }
             const addr =
               typeof (parsed as { address?: unknown }).address === "string"
@@ -928,6 +1051,8 @@ export class RelayCoordinator {
           conn.name = name;
           conn.socket = ws;
           atemConnectorRoleId = conn.id;
+          this.startConnectorPresence(conn.id);
+          void this.refreshConnectorRedisMeta(conn.id).catch(() => {});
           ws.send(
             JSON.stringify({
               type: "atem_connector_ready",
@@ -1022,6 +1147,7 @@ export class RelayCoordinator {
               cameraId: acParsed.cameraId,
               ...(acParsed.port !== undefined && Number.isFinite(acParsed.port) ? { port: acParsed.port } : {}),
             };
+            void this.refreshConnectorRedisMeta(connectorIdOpt).catch(() => {});
             this.sessionAtemConnector.set(hostRoomId, connectorIdOpt);
             try {
               conn.socket.send(
@@ -1094,6 +1220,7 @@ export class RelayCoordinator {
                 cameraId: ac.cameraId,
                 ...(ac.port !== undefined && Number.isFinite(ac.port) ? { port: ac.port } : {}),
               };
+              void this.refreshConnectorRedisMeta(connectorCtl).catch(() => {});
               this.sessionAtemConnector.set(hostRoomId, connectorCtl);
               try {
                 conn.socket.send(
@@ -1222,6 +1349,7 @@ export class RelayCoordinator {
               cameraId: acParsed.cameraId,
               ...(acParsed.port !== undefined && Number.isFinite(acParsed.port) ? { port: acParsed.port } : {}),
             };
+            void this.refreshConnectorRedisMeta(connectorIdJoin).catch(() => {});
             this.sessionAtemConnector.set(joinSid, connectorIdJoin);
             try {
               conn.socket.send(

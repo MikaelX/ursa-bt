@@ -1324,8 +1324,8 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       log("Disconnect local Bluetooth session before joining remotely");
       return;
     }
-    if (relayHostBridge?.isActive) {
-      log("Stop sharing this camera before joining another session.");
+    if (relayHostBridge?.isActive && !relayHostBridge.isAtemCcuHost) {
+      log("Stop sharing Bluetooth before joining another session.");
       return;
     }
 
