@@ -59,6 +59,8 @@ export class RelayJoinedCameraClient implements CameraClient {
       onDropped: () => void;
       /** Same hub TCP link signal as relay host (`atem_ccu_link`). */
       onAtemSwitcherTcp?: (detail: { connected: boolean; address?: string; cameraId?: number }) => void;
+      /** Hub/connector registration/runtime error surfaced from relay (`atem_ccu_error`). */
+      onAtemCcuError?: (message: string) => void;
       log: (message: string) => void;
     },
   ) {}
@@ -160,6 +162,14 @@ export class RelayJoinedCameraClient implements CameraClient {
           case "atem_ccu_log": {
             const msg = (parsed as { message?: string }).message ?? "";
             if (msg) this.params.log(msg);
+            break;
+          }
+          case "atem_ccu_error": {
+            const msg = String((parsed as { message?: unknown }).message ?? "").trim();
+            if (msg) {
+              this.params.log(`ATEM CCU: ${msg}`);
+              this.params.onAtemCcuError?.(msg);
+            }
             break;
           }
           case "atem_ccu_link": {

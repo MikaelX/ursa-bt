@@ -11,7 +11,7 @@ import {
 import { buildAppVersion } from "../buildVersion";
 import { isNativeShell } from "../native/capacitorEnv";
 import { NativeBleCameraClient, readLastNativeBleSnapshot, type NativeBleScanHit } from "../native/nativeBleCameraClient";
-import { RelayJoinedCameraClient } from "../relay/relayJoinCameraClient";
+import { RelayJoinedCameraClient, type JoinerAtemCcuRegister } from "../relay/relayJoinCameraClient";
 import { nullBleCameraClient } from "../relay/nullBleCameraClient";
 import { RelayHostSession, type AtemCcuRelayRegister } from "../relay/relayHostSession";
 import { bleDecodedHandledByAtemBridge } from "../relay/atemBleForwardGuard";
@@ -347,6 +347,8 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   /** Hub ATEM on the joined relay socket (`joiner_atem_ccu_*`), not a separate `host_register` room. */
   let joinerAtemCcuActive = false;
   let joinerAtemSwitcherTcpConnected = false;
+  let lastJoinerAtemCcuRequest: JoinerAtemCcuRegister | undefined;
+  let joinerAtemOfflineFallbackTriedForConnectorId: string | undefined;
   /** BLE GATT linked (device picked and connected locally). */
   let bleLinked = false;
 
@@ -1187,6 +1189,8 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
         relayJoinedDisplaySessionName = undefined;
         joinerAtemCcuActive = false;
         joinerAtemSwitcherTcpConnected = false;
+        lastJoinerAtemCcuRequest = undefined;
+        joinerAtemOfflineFallbackTriedForConnectorId = undefined;
         lastRelayBanksRevisionSeen = undefined;
         joinRelAtemMixerDebugPrimed = false;
         for (const k of Object.keys(lastAtemMixerSnapshotSigByTag)) delete lastAtemMixerSnapshotSigByTag[k];
@@ -1199,7 +1203,24 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       },
       onAtemSwitcherTcp: (detail) => {
         joinerAtemSwitcherTcpConnected = detail.connected;
+        if (detail.connected) joinerAtemOfflineFallbackTriedForConnectorId = undefined;
         syncAtemLanConnectUi?.();
+      },
+      onAtemCcuError: (message) => {
+        const offline = message.toLowerCase().includes("connector is offline");
+        if (!offline || !relayJoinedMode || !joinerAtemCcuActive) return;
+        const staleConnectorId = selectedAtemConnectorId;
+        if (!staleConnectorId || !lastJoinerAtemCcuRequest) return;
+        if (joinerAtemOfflineFallbackTriedForConnectorId === staleConnectorId) return;
+        joinerAtemOfflineFallbackTriedForConnectorId = staleConnectorId;
+        selectedAtemConnectorId = undefined;
+        log("ATEM CCU: selected connector went offline — retrying with refreshed connector routing.");
+        try {
+          relayJoinTransport().registerJoinerAtemCcu(lastJoinerAtemCcuRequest);
+        } catch (e: unknown) {
+          log(`ATEM CCU retry failed: ${errorMessage(e)}`);
+        }
+        void refreshAtemConnectorsDisplay({ soft: false });
       },
       log,
     });
@@ -1991,6 +2012,8 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
           { address: trimmed, cameraId },
           selectedAtemConnectorId,
         );
+        lastJoinerAtemCcuRequest = { address: trimmed, cameraId };
+        joinerAtemOfflineFallbackTriedForConnectorId = undefined;
         joinerAtemCcuActive = true;
         enableAtemMixerDebugDefaults();
         log("ATEM CCU: compact debug trace on — watch for [ccu h] lines in this log.");
@@ -2006,6 +2029,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       } catch (e: unknown) {
         joinerAtemCcuActive = false;
         joinerAtemSwitcherTcpConnected = false;
+        lastJoinerAtemCcuRequest = undefined;
         log(`ATEM connect failed: ${errorMessage(e)}`);
         return false;
       } finally {
@@ -2185,6 +2209,8 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       }
       joinerAtemCcuActive = false;
       joinerAtemSwitcherTcpConnected = false;
+      lastJoinerAtemCcuRequest = undefined;
+      joinerAtemOfflineFallbackTriedForConnectorId = undefined;
       const prefs = relayPrefsForModal(ATEM_CCU_RELAY_DEVICE_ID);
       writeRelayPrefs(ATEM_CCU_RELAY_DEVICE_ID, {
         sessionName: prefs.sessionName,

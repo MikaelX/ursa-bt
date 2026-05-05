@@ -136,6 +136,10 @@ function edgeLog(...args: unknown[]): void {
   console.error("[atem-edge]", ...args);
 }
 
+function trimLogPayload(raw: string, max = 4000): string {
+  return raw.length > max ? `${raw.slice(0, max)}…` : raw;
+}
+
 function errorText(err: unknown): string {
   if (err instanceof Error) return `${err.name}: ${err.message}`;
   if (typeof err === "string") return err;
@@ -292,6 +296,8 @@ function main(): void {
 
     ws.addEventListener("message", (ev) => {
       if (sock !== ws) return;
+      const raw = typeof ev.data === "string" ? ev.data : String(ev.data);
+      edgeLog("inbound raw", trimLogPayload(raw));
       let p: {
         type?: string;
         command?: string;
@@ -303,11 +309,13 @@ function main(): void {
         name?: string;
       };
       try {
-        p = JSON.parse(String(ev.data)) as typeof p;
+        p = JSON.parse(raw) as typeof p;
       } catch {
+        edgeLog("inbound parse failed");
         return;
       }
       const t = p.type;
+      edgeLog("inbound parsed", p);
       edgeLog("inbound", { type: t ?? "(parse ok, no type)" });
 
       if (t === "atem_edge_forward_cmd" && typeof p.hex === "string") {
