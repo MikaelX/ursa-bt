@@ -107,6 +107,26 @@ npm test
 npm run typecheck
 ```
 
+### macOS ATEM Edge helper app
+
+Build the menubar helper app:
+
+```bash
+npm run atem:edge-helper:build
+```
+
+Run it:
+
+```bash
+open "dist/ATEM Edge Helper.app"
+```
+
+The helper can:
+- start/stop `npm run atem:edge-agent`
+- set relay URL + connector name and persist them
+- show rolling stdout/stderr logs
+- register itself as "Start on Login"
+
 ## Docker
 
 A two-stage `Dockerfile` builds the Vite frontend and ships a Node runtime that serves both the static assets and the banks API on a single port:
