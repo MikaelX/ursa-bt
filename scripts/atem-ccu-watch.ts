@@ -10,7 +10,7 @@
  *
  * Usage:
  *   npx tsx scripts/atem-ccu-watch.ts [host] [--inputs N] [--verbose] [--cc-audio] [--raw] [--sparse]
- *   ATEM_HOST=192.168.1.199 npx tsx scripts/atem-ccu-watch.ts
+ *   ATEM_HOST=10.0.0.13 npx tsx scripts/atem-ccu-watch.ts
  *   npm run atem:ccu-watch:log -- [host] …   # `--sparse` + tee → ./atem.log (unknown + CCU events/unhandled only)
  *
  * `--raw` logs every **deserialized** ATEM command (`[atem-raw]` on stderr) and forwards **all** `[atem-debug]`
@@ -61,7 +61,7 @@ function parseArgs(): {
       inputs = Math.max(1, Number(argv[++i]!));
     } else if (!a.startsWith("-")) hostParts.push(a);
   }
-  const host = hostParts[0] ?? process.env.ATEM_HOST ?? "192.168.1.199";
+  const host = hostParts[0] ?? process.env.ATEM_HOST ?? "10.0.0.13";
   if (process.env.ATEM_CCU_WATCH_RAW === "1" || process.env.ATEM_CCU_WATCH_RAW === "true") {
     rawAll = true;
   }

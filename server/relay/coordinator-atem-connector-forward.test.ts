@@ -78,13 +78,24 @@ describe("RelayCoordinator named ATEM connector", () => {
       new Promise<void>((r, j) => joiner.once("open", () => r())),
     ]);
 
-    connector.send(JSON.stringify({ type: "atem_connector_register", name: "vitest-connector" }));
+    connector.send(
+      JSON.stringify({
+        type: "atem_connector_register",
+        name: "vitest-connector",
+        defaultAddress: "192.168.50.10",
+      }),
+    );
     const ready = (await nextJson(
       connector,
       (o) => o.type === "atem_connector_ready" && typeof o.connectorId === "string",
       5000,
     )) as { type: string; connectorId: string; token: string };
     const { connectorId } = ready;
+
+    const listed = await coordinator!.listAtemConnectors();
+    expect(listed.find((c) => c.id === connectorId)).toMatchObject({
+      defaultAddress: "192.168.50.10",
+    });
 
     host.send(
       JSON.stringify({

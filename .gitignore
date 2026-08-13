@@ -41,3 +41,10 @@ tasks/
 # Test / coverage
 coverage/
 .vitest/
+
+# PlatformIO
+**/.pio/
+
+# ATEM edge local credentials
+.atem-edge-*.json
+.atem-edge-*.lock

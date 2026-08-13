@@ -10,7 +10,7 @@ ENV ENVIRONMENT=${ENVIRONMENT}
 COPY package.json package-lock.json* ./
 RUN npm ci
 
-COPY tsconfig.json vite.config.ts index.html patterns.html ./
+COPY tsconfig.json vite.config.ts index.html patterns.html audio-gain.html ./
 COPY src ./src
 COPY server ./server
 

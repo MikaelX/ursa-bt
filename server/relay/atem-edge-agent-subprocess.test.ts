@@ -102,6 +102,7 @@ describe("atem-edge-agent subprocess", () => {
       env: {
         ...process.env,
         ATEM_EDGE_VERBOSE: "1",
+        ATEM_EDGE_NO_LOCK: "1",
         // Ensure connector mode even if shell has stray SESSION_ID
         SESSION_ID: "",
         EDGE_TOKEN: "",

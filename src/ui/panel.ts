@@ -524,16 +524,46 @@ function renderAppHeader(bleAvailable: boolean): string {
 }
 
 function renderConnectView(bleAvailable: boolean, bleUi?: PanelBleUiOptions): string {
+  const atemNative = bleUi?.atemRelayNative === true;
   const atemLan =
     bleUi?.showAtemLanConnect === true
-      ? `
+      ? atemNative
+        ? `
+      <div class="card connect-atem-card" data-atem-ccu-lan-card>
+        <div class="connect-atem-head">
+          <p class="eyebrow connect-atem-eyebrow">ATEM mixer</p>
+          <h2 class="connect-atem-title">Relay camera control</h2>
+        </div>
+        <p class="muted connect-atem-hint">
+          Choose <strong>camera</strong> and tap Connect — this phone joins <strong>bt.bm.almiro.se</strong> only.
+          The truck edge agent on the relay opens ATEM TCP on the local network; your phone never dials the switcher directly.
+        </p>
+        <div class="connect-atem-row">
+          <label class="connect-atem-inline-field connect-atem-inline-field--camera">
+            <span class="connect-atem-inline-label">Camera</span>
+            <input
+              type="number"
+              data-atem-ccu-camera
+              min="1"
+              max="24"
+              step="1"
+            />
+          </label>
+          <button type="button" class="bm-btn connect-primary connect-atem-connect-btn" data-atem-ccu-lan-connect data-control>
+            Connect
+          </button>
+        </div>
+        <p class="muted connect-atem-status" data-atem-ccu-lan-status hidden></p>
+      </div>
+    `
+        : `
       <div class="card connect-atem-card" data-atem-ccu-lan-card>
         <div class="connect-atem-head">
           <p class="eyebrow connect-atem-eyebrow">ATEM mixer</p>
           <h2 class="connect-atem-title">LAN camera control</h2>
         </div>
         <p class="muted connect-atem-hint">
-          Pick a <strong>named connector</strong> when the truck runs <code class="connect-atem-code">npm run atem:edge-agent</code> with <code class="connect-atem-code">CONNECTOR_NAME</code>. Then set switcher address / camera and tap Connect — the hub forwards commands to that LAN agent. Legacy: hub reaches the switcher directly only when the relay process runs on the same LAN as the ATEM.
+          Pick a <strong>named connector</strong> when the truck runs the ATEM edge agent (or menubar helper) with a switcher address set. Then choose <strong>camera</strong> and tap Connect — the hub forwards TCP to that LAN agent. Legacy: enter switcher address manually when no connector advertises one.
         </p>
         <div class="relay-atem-inline" data-relay-atem-inline>
           <h3 class="relay-sessions-inline-title">ATEM connectors</h3>
@@ -1361,8 +1391,10 @@ function renderRelayModals(): string {
 export interface PanelBleUiOptions {
   /** Capacitor WebView: hide install-Bluefy / desktop-Chrome hints — BLE uses the native stack. */
   hideBrowserBleInstallHints?: boolean;
-  /** Desktop/browser only: show ATEM mixer LAN quick-connect on Connect tab. */
+  /** Show ATEM mixer connect on Connect tab (browser + native). */
   showAtemLanConnect?: boolean;
+  /** iOS/Android: relay-only ATEM (camera + Connect); truck edge agent holds LAN TCP. */
+  atemRelayNative?: boolean;
 }
 
 /** @param bleUi - Optional Connect-tab extras (e.g. browser-only ATEM LAN block). */

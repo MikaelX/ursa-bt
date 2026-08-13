@@ -86,6 +86,9 @@ export type RelayWireMessage =
       name: string;
       connectorId?: string;
       token?: string;
+      /** LAN switcher IP/hostname configured on the edge agent (Connect UI can omit address). */
+      defaultAddress?: string;
+      defaultPort?: number;
     }
   | { type: "atem_connector_ready"; connectorId: string; token: string; name: string }
   | { type: "atem_connector_panel_sync"; connectorId: string; snapshot: Record<string, unknown> }
@@ -135,6 +138,9 @@ type AtemConnector = {
   token: string;
   socket?: WsType;
   tcpLinked?: boolean;
+  /** Switcher on the LAN where this agent runs; advertised to Connect UI. */
+  defaultAddress?: string;
+  defaultPort?: number;
   target?: { address: string; cameraId: number; port?: number };
 };
 
@@ -357,6 +363,8 @@ export class RelayCoordinator {
       name: string;
       online: boolean;
       tcpLinked?: boolean;
+      defaultAddress?: string;
+      defaultPort?: number;
       target?: { address: string; cameraId: number; port?: number };
     }[]
   > {
@@ -367,6 +375,8 @@ export class RelayCoordinator {
         name: string;
         online: boolean;
         tcpLinked?: boolean;
+        defaultAddress?: string;
+        defaultPort?: number;
         target?: { address: string; cameraId: number; port?: number };
       }
     >();
@@ -377,6 +387,8 @@ export class RelayCoordinator {
         name: c.name,
         online: c.socket?.readyState === 1,
         tcpLinked: c.tcpLinked,
+        ...(c.defaultAddress ? { defaultAddress: c.defaultAddress } : {}),
+        ...(c.defaultPort !== undefined ? { defaultPort: c.defaultPort } : {}),
         target: c.target,
       });
     }
@@ -397,6 +409,8 @@ export class RelayCoordinator {
         const recAddress = (h.targetAddress ?? "").trim();
         const recCameraId = Number(h.targetCameraId ?? "");
         const recPort = Number(h.targetPort ?? "");
+        const recDefaultAddress = (h.defaultAddress ?? "").trim();
+        const recDefaultPort = Number(h.defaultPort ?? "");
         const recTarget =
           recAddress && Number.isFinite(recCameraId)
             ? {
@@ -412,6 +426,10 @@ export class RelayCoordinator {
             name,
             online: recOnline,
             ...(recTcpLinked !== undefined ? { tcpLinked: recTcpLinked } : {}),
+            ...(recDefaultAddress ? { defaultAddress: recDefaultAddress } : {}),
+            ...(Number.isFinite(recDefaultPort) && recDefaultPort > 0
+              ? { defaultPort: Math.round(recDefaultPort) }
+              : {}),
             ...(recTarget ? { target: recTarget } : {}),
           });
           continue;
@@ -424,6 +442,16 @@ export class RelayCoordinator {
             ? { tcpLinked: prev.tcpLinked }
             : recTcpLinked !== undefined
               ? { tcpLinked: recTcpLinked }
+              : {}),
+          ...(prev.defaultAddress
+            ? { defaultAddress: prev.defaultAddress }
+            : recDefaultAddress
+              ? { defaultAddress: recDefaultAddress }
+              : {}),
+          ...(prev.defaultPort !== undefined
+            ? { defaultPort: prev.defaultPort }
+            : Number.isFinite(recDefaultPort) && recDefaultPort > 0
+              ? { defaultPort: Math.round(recDefaultPort) }
               : {}),
           ...(prev.target ? { target: prev.target } : recTarget ? { target: recTarget } : {}),
         });
@@ -628,6 +656,10 @@ export class RelayCoordinator {
     if (conn.tcpLinked === true) multi.hset(key, "tcpLinked", "1");
     else if (conn.tcpLinked === false) multi.hset(key, "tcpLinked", "0");
     else multi.hdel(key, "tcpLinked");
+    if (conn.defaultAddress) multi.hset(key, "defaultAddress", conn.defaultAddress);
+    else multi.hdel(key, "defaultAddress");
+    if (conn.defaultPort !== undefined) multi.hset(key, "defaultPort", String(conn.defaultPort));
+    else multi.hdel(key, "defaultPort");
     if (conn.target) {
       multi.hset(key, "targetAddress", conn.target.address, "targetCameraId", String(conn.target.cameraId));
       if (conn.target.port !== undefined) multi.hset(key, "targetPort", String(conn.target.port));
@@ -1049,6 +1081,18 @@ export class RelayCoordinator {
             }
           }
           conn.name = name;
+          const defaultAddress = String((parsed as { defaultAddress?: unknown }).defaultAddress ?? "").trim();
+          const defaultPortRaw = (parsed as { defaultPort?: unknown }).defaultPort;
+          const defaultPort =
+            defaultPortRaw !== undefined &&
+            Number.isFinite(Number(defaultPortRaw)) &&
+            Number(defaultPortRaw) > 0
+              ? Math.round(Number(defaultPortRaw))
+              : undefined;
+          if (defaultAddress) conn.defaultAddress = defaultAddress;
+          else delete conn.defaultAddress;
+          if (defaultPort !== undefined) conn.defaultPort = defaultPort;
+          else delete conn.defaultPort;
           conn.socket = ws;
           atemConnectorRoleId = conn.id;
           this.startConnectorPresence(conn.id);

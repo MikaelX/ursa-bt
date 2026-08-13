@@ -792,13 +792,59 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
 
   /** Selected row in {@link renderRelayAtemUl} — routes CCU to a named LAN connector. */
   let selectedAtemConnectorId: string | undefined;
+  let lastAtemConnectorsList: RelayListedAtemConnector[] = [];
 
   interface RelayListedAtemConnector {
     id: string;
     name: string;
     online: boolean;
     tcpLinked?: boolean;
+    defaultAddress?: string;
+    defaultPort?: number;
     target?: { address: string; cameraId: number; port?: number };
+  }
+
+  function selectedAtemConnectorRow(): RelayListedAtemConnector | undefined {
+    if (!selectedAtemConnectorId) return undefined;
+    return lastAtemConnectorsList.find((row) => row.id === selectedAtemConnectorId);
+  }
+
+  /** Switcher IP from the selected connector (edge agent advertises it); falls back to prefs / field. */
+  function resolveAtemConnectAddress(ipFromField: string): string {
+    if (isNativeShell()) {
+      return selectedAtemConnectorRow()?.defaultAddress?.trim() ?? "";
+    }
+    const fromField = ipFromField.trim();
+    if (fromField) return fromField;
+    const fromConnector = selectedAtemConnectorRow()?.defaultAddress?.trim();
+    if (fromConnector) return fromConnector;
+    return relayPrefsForModal(ATEM_CCU_RELAY_DEVICE_ID).atemAddress.trim();
+  }
+
+  /** Native: auto-pick an online truck connector on the relay (phone never uses LAN IP). */
+  async function ensureAtemConnectorForRelayConnect(): Promise<boolean> {
+    if (!isNativeShell()) return true;
+    if (selectedAtemConnectorId) {
+      const cur = selectedAtemConnectorRow();
+      if (cur?.online && cur.defaultAddress?.trim()) return true;
+    }
+    await refreshAtemConnectorsDisplay({ soft: false });
+    const online = lastAtemConnectorsList.filter((row) => row.online);
+    const picked =
+      online.find((row) => row.defaultAddress?.trim()) ??
+      online[0];
+    if (!picked?.defaultAddress?.trim()) {
+      log(
+        online.length > 0
+          ? "ATEM relay: no online connector advertises a switcher address — set Switcher Address in the truck ATEM Edge Helper."
+          : "ATEM relay: no truck connector online on bt.bm.almiro.se — start the ATEM Edge Helper on the LAN with the switcher.",
+      );
+      return false;
+    }
+    selectedAtemConnectorId = picked.id;
+    log(`ATEM relay: using truck connector "${picked.name}" via bt.bm.almiro.se (camera TCP on LAN).`);
+    syncAtemLanConnectUi?.();
+    return true;
   }
 
   async function fetchRelaySessionsList(): Promise<RelayListedSession[]> {
@@ -862,28 +908,32 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
       b.classList.toggle("relay-session-row--selected", selected);
       b.setAttribute("aria-pressed", selected ? "true" : "false");
       const on = row.online ? "●" : "○";
+      const defAddr = row.defaultAddress ? ` · ${row.defaultAddress}` : "";
       const tgt =
         row.target?.address && row.target.cameraId !== undefined
           ? ` · ${row.target.address} cam ${row.target.cameraId}`
           : "";
       const link = row.tcpLinked === true ? " · TCP✓" : row.tcpLinked === false ? " · TCP…" : "";
-      b.textContent = `${on} ${row.name}${tgt}${link}`;
+      b.textContent = `${on} ${row.name}${defAddr}${tgt}${link}`;
       b.title = row.id;
       b.addEventListener("click", () => {
         selectedAtemConnectorId = row.id;
         ul.dataset.selectedConnector = row.id;
         const ipEl = root.querySelector<HTMLInputElement>("[data-atem-ccu-ip]");
         const camEl = root.querySelector<HTMLInputElement>("[data-atem-ccu-camera]");
-        if (row.target?.address && ipEl) ipEl.value = row.target.address;
+        if (row.defaultAddress && ipEl) ipEl.value = row.defaultAddress;
+        else if (row.target?.address && ipEl) ipEl.value = row.target.address;
         if (row.target?.cameraId !== undefined && camEl) camEl.value = String(row.target.cameraId);
         renderRelayAtemUl(ul, list);
+        syncAtemLanConnectUi?.();
       });
       li.appendChild(b);
       ul.appendChild(li);
       if (selected) {
         const ipEl = root.querySelector<HTMLInputElement>("[data-atem-ccu-ip]");
         const camEl = root.querySelector<HTMLInputElement>("[data-atem-ccu-camera]");
-        if (row.target?.address && ipEl && ipEl.value.trim() === "") ipEl.value = row.target.address;
+        if (row.defaultAddress && ipEl) ipEl.value = row.defaultAddress;
+        else if (row.target?.address && ipEl && ipEl.value.trim() === "") ipEl.value = row.target.address;
         if (row.target?.cameraId !== undefined && camEl && camEl.value.trim() === "") {
           camEl.value = String(row.target.cameraId);
         }
@@ -905,6 +955,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     }
     try {
       const list = await fetchRelayAtemConnectorsList();
+      lastAtemConnectorsList = list;
       renderRelayAtemUl(ul, list);
       if (list.length === 0) {
         empty.hidden = false;
@@ -1300,7 +1351,8 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
 
   root.innerHTML = renderPanelTemplate(rawClient.isSupported, {
     hideBrowserBleInstallHints: isNativeShell(),
-    showAtemLanConnect: !isNativeShell(),
+    showAtemLanConnect: true,
+    atemRelayNative: isNativeShell(),
   });
   const settingsVersionEl = root.querySelector("[data-settings-version]");
   if (settingsVersionEl) {
@@ -1313,6 +1365,7 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     onViewChange(viewId: ViewId) {
       if (viewId === "connect") {
         void refreshRelaySessionsDisplay({ soft: true });
+        void refreshAtemConnectorsDisplay({ soft: true });
         syncAtemLanConnectUi?.();
       }
       scheduleNativeBleDiscovery?.();
@@ -1815,13 +1868,21 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     const camEl = root.querySelector<HTMLInputElement>("[data-atem-ccu-camera]");
     const btn = root.querySelector<HTMLButtonElement>("[data-atem-ccu-lan-connect]");
     const statusEl = root.querySelector<HTMLElement>("[data-atem-ccu-lan-status]");
+    const addressField = root.querySelector<HTMLElement>(".connect-atem-inline-field--address");
     const prefs = relayPrefsForModal(ATEM_CCU_RELAY_DEVICE_ID);
+    const connectorDefault = selectedAtemConnectorRow()?.defaultAddress?.trim();
     const wsOk = typeof WebSocket !== "undefined";
     const atemLive = !!relayHostBridge?.isAtemCcuHost || joinerAtemCcuActive;
     const persistHostIntent = readAtemLanPersistIntent() && !atemLive && wsOk;
     const atemLanConnectInProgress = atemLanResumeInFlight && !atemLive && wsOk;
 
-    if (ipEl && ipEl.value.trim() === "") ipEl.value = prefs.atemAddress;
+    if (!isNativeShell()) {
+      if (connectorDefault && ipEl) ipEl.value = connectorDefault;
+      else if (ipEl && ipEl.value.trim() === "") ipEl.value = prefs.atemAddress;
+    }
+    if (addressField instanceof HTMLElement) {
+      addressField.hidden = isNativeShell() || (Boolean(connectorDefault) && !atemLive);
+    }
     if (camEl) {
       if (atemLive || persistHostIntent) {
         camEl.value = String(prefs.atemCameraId);
@@ -1975,9 +2036,15 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   }
 
   async function performAtemLanHost(ip: string, cameraId: number): Promise<boolean> {
-    const trimmed = ip.trim();
+    const trimmed = resolveAtemConnectAddress(ip);
     if (!trimmed) {
-      log("Enter the ATEM IP or hostname.");
+      log(
+        isNativeShell()
+          ? "ATEM relay: no switcher on truck connector — start ATEM Edge Helper with Switcher Address set."
+          : selectedAtemConnectorId
+            ? "Pick an ATEM connector with a switcher address, or enter the IP."
+            : "Enter the ATEM IP or hostname.",
+      );
       return false;
     }
     if (typeof WebSocket === "undefined") {
@@ -2176,8 +2243,9 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
     if (!readAtemLanPersistIntent()) return;
     if (relayHostBridge?.isAtemCcuHost && relayHostBridge.isActive) return;
     if (relayJoinedMode || bleLinked) return;
+    if (isNativeShell() && !(await ensureAtemConnectorForRelayConnect())) return;
     const prefs = relayPrefsForModal(ATEM_CCU_RELAY_DEVICE_ID);
-    const addr = prefs.atemAddress.trim();
+    const addr = isNativeShell() ? resolveAtemConnectAddress("") : prefs.atemAddress.trim();
     const cam = clampAtemCameraId(prefs.atemCameraId);
     if (!addr) return;
     atemLanReconnectAttempts = 0;
@@ -2187,9 +2255,10 @@ export function createApp(root: HTMLElement, options: AppOptions = {}): void {
   }
 
   async function connectAtemFromConnectView(): Promise<void> {
+    if (!(await ensureAtemConnectorForRelayConnect())) return;
     const ipEl = root.querySelector<HTMLInputElement>("[data-atem-ccu-ip]");
     const camEl = root.querySelector<HTMLInputElement>("[data-atem-ccu-camera]");
-    const ip = ipEl?.value.trim() ?? "";
+    const ip = resolveAtemConnectAddress(ipEl?.value ?? "");
     const prefsCam = relayPrefsForModal(ATEM_CCU_RELAY_DEVICE_ID).atemCameraId;
     const camStr = camEl?.value.trim() ?? "";
     const camRaw = Number(camStr);

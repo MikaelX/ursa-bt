@@ -6,6 +6,7 @@ private enum HelperConfig {
 	static let appName = "ATEM Edge Helper"
 	static let relayURL = "wss://bt.bm.almiro.se/api/relay/socket"
 	static let connectorName = "Truck A"
+	static let switcherAddress = "192.168.1.199"
 	static let stdoutLog = "atem-edge-helper.log"
 	static let stderrLog = "atem-edge-helper.err.log"
 }
@@ -33,6 +34,7 @@ private enum HelperState {
 private struct HelperSettings: Codable {
 	let relayURL: String
 	let connectorName: String
+	let switcherAddress: String?
 }
 
 private final class MenuInfoRowView: NSView {
@@ -244,14 +246,13 @@ private final class LogWindowController: NSWindowController {
 private final class AppDelegate: NSObject, NSApplicationDelegate {
 	private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 	private var helperProcess: Process?
-	private var stdoutHandle: FileHandle?
-	private var stderrHandle: FileHandle?
 	private var state: HelperState = .stopped
 	private var shouldKeepRunning = false
 	private var isStopping = false
 	private var repoRootURL: URL
 	private var relayURL = HelperConfig.relayURL
 	private var connectorName = HelperConfig.connectorName
+	private var switcherAddress = HelperConfig.switcherAddress
 	private lazy var logWindowController = LogWindowController(logURLs: logURLs())
 
 	override init() {
@@ -306,10 +307,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 		if !saved.connectorName.isEmpty {
 			connectorName = saved.connectorName
 		}
+		if let addr = saved.switcherAddress, !addr.isEmpty {
+			switcherAddress = addr
+		}
 	}
 
 	private func saveSettings() {
-		let saved = HelperSettings(relayURL: relayURL, connectorName: connectorName)
+		let saved = HelperSettings(
+			relayURL: relayURL,
+			connectorName: connectorName,
+			switcherAddress: switcherAddress
+		)
 		guard let data = try? JSONEncoder().encode(saved) else {
 			return
 		}
@@ -345,8 +353,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 		menu.addItem(infoItem("Repo", repoRootURL.path))
 		menu.addItem(infoItem("Relay URL", relayURL))
 		menu.addItem(infoItem("Connector", connectorName))
+		menu.addItem(infoItem("Switcher", switcherAddress))
 		menu.addItem(actionItem("Set Relay URL...", #selector(setRelayURL)))
 		menu.addItem(actionItem("Set Connector Name...", #selector(setConnectorName)))
+		menu.addItem(actionItem("Set Switcher Address...", #selector(setSwitcherAddress)))
 		menu.addItem(actionItem("Show Log", #selector(showLog)))
 		menu.addItem(NSMenuItem.separator())
 		menu.addItem(actionItem("Quit", #selector(quit)))
@@ -476,35 +486,64 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 		return image
 	}
 
+	private func shellQuote(_ value: String) -> String {
+		"'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+	}
+
+	private func tsxLaunchCommand() -> String {
+		let repo = shellQuote(repoRootURL.path)
+		let tsx = shellQuote(repoRootURL.appendingPathComponent("node_modules/.bin/tsx").path)
+		let script = shellQuote(repoRootURL.appendingPathComponent("scripts/atem-edge-agent.ts").path)
+		let errLog = shellQuote(logsDirectory().appendingPathComponent(HelperConfig.stderrLog).path)
+		let relay = shellQuote(relayURL)
+		let name = shellQuote(connectorName)
+		let switcher = shellQuote(switcherAddress)
+		// Shell redirect: npm→FileHandle drops tsx stderr on macOS; tsx direct + >> captures live logs.
+		return """
+		cd \(repo) && \
+		ATEM_EDGE_SWITCHER_LOG=1 ATEM_CCU_LOG_MIXER_RX=1 \
+		RELAY_URL=\(relay) CONNECTOR_NAME=\(name) ATEM_SWITCHER_ADDRESS=\(switcher) \
+		\(tsx) \(script) --relay \(relay) --name \(name) --switcher \(switcher) \
+		>> \(errLog) 2>&1
+		"""
+	}
+
+	private func stopStaleEdgeAgents() {
+		let proc = Process()
+		proc.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+		proc.arguments = ["-f", "scripts/atem-edge-agent.ts"]
+		try {
+			try proc.run()
+			proc.waitUntilExit()
+		} catch {
+			// pkill exits 1 when no processes matched
+		}
+	}
+
 	private func startHelper() {
 		if helperProcess != nil {
 			return
 		}
+		let tsxPath = repoRootURL.appendingPathComponent("node_modules/.bin/tsx").path
 		guard FileManager.default.fileExists(atPath: repoRootURL.path) else {
 			setState(.error("repo root not found: \(repoRootURL.path)"))
 			return
 		}
+		guard FileManager.default.fileExists(atPath: tsxPath) else {
+			setState(.error("tsx not found — run npm install in \(repoRootURL.path)"))
+			return
+		}
+		stopStaleEdgeAgents()
 		appendLog("starting atem edge helper")
 		setState(.starting)
 		shouldKeepRunning = true
 		isStopping = false
 
 		let process = Process()
-		process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-		process.arguments = [
-			"npm",
-			"run",
-			"atem:edge-agent",
-			"--",
-			"--relay",
-			relayURL,
-			"--name",
-			connectorName,
-		]
+		process.executableURL = URL(fileURLWithPath: "/bin/sh")
+		process.arguments = ["-c", tsxLaunchCommand()]
 		process.currentDirectoryURL = repoRootURL
 		process.environment = processEnvironment()
-		process.standardOutput = logHandle(named: HelperConfig.stdoutLog)
-		process.standardError = logHandle(named: HelperConfig.stderrLog)
 		process.terminationHandler = { [weak self] finishedProcess in
 			DispatchQueue.main.async {
 				self?.helperDidTerminate(finishedProcess)
@@ -515,9 +554,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 			try process.run()
 			helperProcess = process
 			setState(.running(pid: process.processIdentifier))
-			appendLog("started pid \(process.processIdentifier) relay=\(relayURL) connector=\(connectorName)")
+			appendLog("started pid \(process.processIdentifier) relay=\(relayURL) connector=\(connectorName) switcher=\(switcherAddress)")
 		} catch {
-			closeLogHandles()
 			appendLog("failed to start: \(error.localizedDescription)")
 			setState(.error(error.localizedDescription))
 			scheduleRestartIfNeeded()
@@ -544,7 +582,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 		if helperProcess === process {
 			helperProcess = nil
 		}
-		closeLogHandles()
 		let exitDescription = "exited with status \(process.terminationStatus)"
 		if isStopping && !shouldKeepRunning {
 			isStopping = false
@@ -574,6 +611,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 	private func processEnvironment() -> [String: String] {
 		var environment = ProcessInfo.processInfo.environment
 		environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
+		environment["ATEM_EDGE_SWITCHER_LOG"] = "1"
+		environment["ATEM_CCU_LOG_MIXER_RX"] = "1"
+		environment["RELAY_URL"] = relayURL
+		environment["CONNECTOR_NAME"] = connectorName
+		environment["ATEM_SWITCHER_ADDRESS"] = switcherAddress
 		return environment
 	}
 
@@ -591,30 +633,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 			directory.appendingPathComponent(HelperConfig.stderrLog),
 			directory.appendingPathComponent(HelperConfig.stdoutLog),
 		]
-	}
-
-	private func logHandle(named name: String) -> FileHandle? {
-		do {
-			let url = logsDirectory().appendingPathComponent(name)
-			FileManager.default.createFile(atPath: url.path, contents: nil)
-			let handle = try FileHandle(forWritingTo: url)
-			try handle.seekToEnd()
-			if name == HelperConfig.stdoutLog {
-				stdoutHandle = handle
-			} else {
-				stderrHandle = handle
-			}
-			return handle
-		} catch {
-			return nil
-		}
-	}
-
-	private func closeLogHandles() {
-		try? stdoutHandle?.close()
-		try? stderrHandle?.close()
-		stdoutHandle = nil
-		stderrHandle = nil
 	}
 
 	private func appendLog(_ message: String) {
@@ -714,6 +732,22 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 			connectorName = value
 			saveSettings()
 			appendLog("connector name updated to \(value)")
+			rebuildMenu()
+			restartIfRunning()
+		}
+	}
+
+	@objc private func setSwitcherAddress() {
+		promptTextInput(
+			title: "Switcher Address",
+			message: "Local ATEM IP or hostname on this LAN. Connect UI uses this so operators only pick a camera.",
+			initialValue: switcherAddress,
+			placeholder: HelperConfig.switcherAddress
+		) { [weak self] value in
+			guard let self else { return }
+			switcherAddress = value
+			saveSettings()
+			appendLog("switcher address updated to \(value)")
 			rebuildMenu()
 			restartIfRunning()
 		}

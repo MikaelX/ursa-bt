@@ -12,6 +12,9 @@ import {
 } from "../src/banks/bank.js";
 import { BANKS_DEV_PORT } from "../src/banks/devServerPort.js";
 import { RelayCoordinator } from "./relay/coordinator.js";
+import { AtemCcuRoomBridge } from "./atem/atemCcuRoomBridge.js";
+import { ATEM_CCU_TRACE_SNAPSHOT_KEY } from "./atem/ccuWatchStyleTrace.js";
+import { decodeConfigurationPacket } from "../src/blackmagic/protocol.js";
 
 /**
  * @file index.ts (`server`)
@@ -248,11 +251,158 @@ const ROUTES = {
   cameraGlobalSceneSlot: /^\/api\/cameras\/([^/]+)\/global-scenes\/(\d+)$/,
   state: /^\/api\/cameras\/([^/]+)\/state$/,
   atemCcuRelay: /^\/api\/cameras\/([^/]+)\/atem-ccu-relay$/,
+  localAtemConnect: /^\/api\/atem-audio-gain\/connect\/?$/,
+  localAtemDisconnect: /^\/api\/atem-audio-gain\/disconnect\/?$/,
+  localAtemForward: /^\/api\/atem-audio-gain\/forward\/?$/,
+  localAtemLevels: /^\/api\/atem-audio-gain\/levels\/?$/,
+  localAtemStatus: /^\/api\/atem-audio-gain\/status\/?$/,
   relaySessions: /^\/api\/relay\/sessions\/?$/,
   relayAtemConnectors: /^\/api\/relay\/atem-connectors\/?$/,
 };
 
 const relayCoordinator = new RelayCoordinator(process.env.REDIS_URL);
+let localAudioGainBridge: AtemCcuRoomBridge | undefined;
+let localAudioGainTarget: { address: string; port: number } | undefined;
+/** Last configured L/R gain sent from any audio-gain client (survives reconnect). */
+const localAudioGainConfigured = new Map<number, { left: number; right: number; updatedAt: number }>();
+/** Latest ATEM CC echo for RX readouts (may track live meters). */
+const localAudioGainReceived = new Map<number, { left: number; right: number; receivedAt: number }>();
+const LOCAL_AUDIO_GAIN_CAMERA_SLOTS = 16;
+
+function localAudioGainLevelsPayload(
+  map: Map<number, { left: number; right: number; updatedAt?: number; receivedAt?: number }>,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    [...map.entries()].map(([cameraId, row]) => [
+      String(cameraId),
+      { left: row.left, right: row.right, updatedAt: row.updatedAt ?? row.receivedAt ?? Date.now() },
+    ]),
+  );
+}
+
+function syncLocalAudioGainFromBridge(): void {
+  const bridge = localAudioGainBridge;
+  if (!bridge) return;
+  for (const [cameraId, levels] of bridge.getAllAudioInputLevels()) {
+    maybeStoreLocalAudioGainEcho(cameraId, levels);
+  }
+}
+
+function localAudioGainStatus(): Record<string, unknown> {
+  syncLocalAudioGainFromBridge();
+  return {
+    connected: Boolean(localAudioGainBridge?.isTcpLinked),
+    target: localAudioGainTarget,
+    cameraSlots: LOCAL_AUDIO_GAIN_CAMERA_SLOTS,
+    levels: localAudioGainLevelsPayload(localAudioGainConfigured),
+    received: localAudioGainLevelsPayload(localAudioGainReceived),
+  };
+}
+
+function maybeStoreLocalAudioGainConfigured(cameraId: unknown, levels: unknown): void {
+  if (typeof cameraId !== "number" || !Number.isFinite(cameraId) || cameraId < 1) return;
+  if (!levels || typeof levels !== "object" || Array.isArray(levels)) return;
+  const left = Number((levels as { left?: unknown }).left);
+  const right = Number((levels as { right?: unknown }).right);
+  if (!Number.isFinite(left) || !Number.isFinite(right)) return;
+  localAudioGainConfigured.set(Math.round(cameraId), { left, right, updatedAt: Date.now() });
+}
+
+function maybeStoreLocalAudioGainEcho(cameraId: unknown, levels: unknown): void {
+  if (typeof cameraId !== "number" || !Number.isFinite(cameraId)) return;
+  if (!levels || typeof levels !== "object" || Array.isArray(levels)) return;
+  const left = Number((levels as { left?: unknown }).left);
+  const right = Number((levels as { right?: unknown }).right);
+  if (!Number.isFinite(left) || !Number.isFinite(right)) return;
+  localAudioGainReceived.set(Math.round(cameraId), { left, right, receivedAt: Date.now() });
+}
+
+function mergeLocalAudioGainConfiguredFromClient(body: Record<string, unknown>): void {
+  const levels = body.levels;
+  if (!levels || typeof levels !== "object" || Array.isArray(levels)) return;
+  for (const [key, row] of Object.entries(levels as Record<string, unknown>)) {
+    const cameraId = Math.round(Number(key));
+    if (!Number.isFinite(cameraId) || cameraId < 1) continue;
+    maybeStoreLocalAudioGainConfigured(cameraId, row);
+  }
+}
+
+function maybeStoreLocalAudioGainFromForwardHex(hex: string): void {
+  const clean = hex.replace(/\s+/g, "");
+  if (clean.length < 16 || clean.length % 2 !== 0) return;
+  const bytes = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  const decoded = decodeConfigurationPacket(bytes);
+  if (!decoded || decoded.category !== 2 || decoded.parameter !== 5) return;
+  maybeStoreLocalAudioGainConfigured(decoded.destination, {
+    left: decoded.values[0],
+    right: decoded.values[1],
+  });
+}
+
+function recordLocalAudioGainSnapshot(snapshot: Record<string, unknown>): void {
+  const trace = snapshot[ATEM_CCU_TRACE_SNAPSHOT_KEY];
+  if (trace && typeof trace === "object" && !Array.isArray(trace)) {
+    maybeStoreLocalAudioGainEcho((trace as { cameraId?: unknown }).cameraId, (trace as { ccuAudioInputLevels?: unknown }).ccuAudioInputLevels);
+  }
+  const audio = snapshot.audio;
+  if (audio && typeof audio === "object" && !Array.isArray(audio)) {
+    maybeStoreLocalAudioGainEcho(1, (audio as { inputLevels?: unknown }).inputLevels);
+  }
+}
+
+async function connectLocalAudioGainBridge(body: unknown): Promise<Record<string, unknown>> {
+  if (!body || typeof body !== "object") throw new HttpError(400, "Expected JSON object");
+  const o = body as Record<string, unknown>;
+  const address = String(o.address ?? "").trim();
+  const port = o.port === undefined || o.port === null ? 9910 : Math.round(Number(o.port));
+  if (!address) throw new HttpError(400, "address required");
+  if (!Number.isFinite(port) || port < 1 || port > 65535) throw new HttpError(400, "port must be 1..65535");
+  mergeLocalAudioGainConfiguredFromClient(o);
+
+  if (
+    localAudioGainBridge?.isTcpLinked &&
+    localAudioGainTarget?.address === address &&
+    localAudioGainTarget?.port === port
+  ) {
+    syncLocalAudioGainFromBridge();
+    return localAudioGainStatus();
+  }
+
+  localAudioGainBridge?.dispose();
+  localAudioGainTarget = { address, port };
+  localAudioGainBridge = new AtemCcuRoomBridge(1, LOCAL_AUDIO_GAIN_CAMERA_SLOTS, {
+    emitPanelSync: (snapshot) => recordLocalAudioGainSnapshot(snapshot),
+    hostSocket: () => undefined,
+    onAtemTcpLinkChange: (linked) => {
+      console.log(`[atem-audio-gain] ${linked ? "connected" : "disconnected"} ${address}:${port}`);
+    },
+    notifyHost: (message) => console.warn("[atem-audio-gain]", message),
+    onHostLog: (message) => console.log("[atem-audio-gain]", message),
+  });
+  await localAudioGainBridge.connect(address, port);
+  return localAudioGainStatus();
+}
+
+async function forwardLocalAudioGainCommand(body: unknown): Promise<Record<string, unknown>> {
+  if (!body || typeof body !== "object") throw new HttpError(400, "Expected JSON object");
+  const hex = String((body as Record<string, unknown>).hex ?? "").trim();
+  if (!hex) throw new HttpError(400, "hex required");
+  if (!localAudioGainBridge?.isTcpLinked) throw new HttpError(409, "ATEM is not connected");
+  maybeStoreLocalAudioGainFromForwardHex(hex);
+  await localAudioGainBridge.handleForwardCmdHex(hex);
+  syncLocalAudioGainFromBridge();
+  return localAudioGainStatus();
+}
+
+function disconnectLocalAudioGainBridge(): Record<string, unknown> {
+  localAudioGainBridge?.dispose();
+  localAudioGainBridge = undefined;
+  localAudioGainTarget = undefined;
+  return localAudioGainStatus();
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // `handle()` + optional static SPA (`STATIC_DIR`)
@@ -313,6 +463,36 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const body = await readJson(req);
     const file = await saveAtemCcuRelay(decodeURIComponent(match[1]!), body);
     send(res, 200, file);
+    return;
+  }
+
+  if (url.match(ROUTES.localAtemConnect) && method === "POST") {
+    const body = await readJson(req);
+    send(res, 200, await connectLocalAudioGainBridge(body));
+    return;
+  }
+
+  if (url.match(ROUTES.localAtemDisconnect) && method === "POST") {
+    send(res, 200, disconnectLocalAudioGainBridge());
+    return;
+  }
+
+  if (url.match(ROUTES.localAtemForward) && method === "POST") {
+    const body = await readJson(req);
+    send(res, 200, await forwardLocalAudioGainCommand(body));
+    return;
+  }
+
+  if (url.match(ROUTES.localAtemLevels) && method === "POST") {
+    const body = await readJson(req);
+    if (!body || typeof body !== "object") throw new HttpError(400, "Expected JSON object");
+    mergeLocalAudioGainConfiguredFromClient(body as Record<string, unknown>);
+    send(res, 200, localAudioGainStatus());
+    return;
+  }
+
+  if (url.match(ROUTES.localAtemStatus) && method === "GET") {
+    send(res, 200, localAudioGainStatus(), { "cache-control": "no-store" });
     return;
   }
 

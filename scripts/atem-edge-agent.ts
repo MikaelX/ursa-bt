@@ -2,7 +2,8 @@
 /**
  * LAN ATEM connector — registers a **named** mixer bridge on the relay; CCU TCP stays on this machine.
  *
- *   CONNECTOR_NAME="Truck A" RELAY_URL=wss://bt.bm.almiro.se/api/relay/socket npm run atem:edge-agent
+ *   CONNECTOR_NAME="Truck A" ATEM_SWITCHER_ADDRESS=10.0.0.13 npm run atem:edge-agent
+ *   (defaults to relay wss://bt.bm.almiro.se — set ENVIRONMENT=LOCAL for ws://127.0.0.1:9132)
  *   (`CONNECTION_NAME` is accepted as a typo alias for `CONNECTOR_NAME`.)
  *
  * Reconnect with stable id (persist `connectorId` + token from first `atem_connector_ready`):
@@ -10,8 +11,8 @@
  *
  * Legacy session edge (`atem_edge_register`) still works with SESSION_ID + EDGE_TOKEN if CONNECTOR_NAME is unset.
  *
- * Verbose stderr (`[atem-edge] …`): `ATEM_EDGE_VERBOSE=1` or `true` — logs relay downlink types, connect targets,
- * and forward_cmd hex (truncated).
+ * Verbose relay stderr (`[atem-edge] …`): `ATEM_EDGE_VERBOSE=1` or `true`.
+ * Switcher TCP + CCU traffic (`[atem-switcher] …`, `[atem-raw] …`): on by default; `ATEM_EDGE_SWITCHER_LOG=0` to disable.
  *
  * @private
  */
@@ -21,6 +22,24 @@ import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { BANKS_DEV_PORT } from "../src/banks/devServerPort.js";
 import { AtemCcuRoomBridge } from "../server/atem/atemCcuRoomBridge.js";
+
+const DEFAULT_RELAY_WS = "wss://bt.bm.almiro.se/api/relay/socket";
+
+function defaultRelayUrl(): string {
+  if (process.env.ENVIRONMENT?.trim().toUpperCase() === "LOCAL") {
+    return `ws://127.0.0.1:${BANKS_DEV_PORT}/api/relay/socket`;
+  }
+  return DEFAULT_RELAY_WS;
+}
+
+function isLocalRelayUrl(url: string): boolean {
+  try {
+    const h = new URL(url).hostname;
+    return h === "127.0.0.1" || h === "localhost" || h === "::1";
+  } catch {
+    return false;
+  }
+}
 
 function argvFlag(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -36,6 +55,8 @@ type Cli =
       connectorId?: string;
       token?: string;
       stateFile?: string;
+      defaultAddress?: string;
+      defaultPort?: number;
     }
   | { mode: "legacy"; relayUrl: string; sessionId: string; token: string };
 
@@ -44,6 +65,61 @@ function connectorStateFile(name: string): string {
   if (fromEnv) return fromEnv;
   const safe = name.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
   return path.resolve(process.cwd(), `.atem-edge-${safe || "connector"}.json`);
+}
+
+function connectorLockFile(name: string): string {
+  return connectorStateFile(name).replace(/\.json$/, ".lock");
+}
+
+function connectorLockEnabled(): boolean {
+  return process.env.ATEM_EDGE_NO_LOCK !== "1";
+}
+
+function pidAlive(pid: number): boolean {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** One edge agent per connector name on this machine — stops token/replace loops from duplicate processes. */
+function acquireConnectorLock(name: string): void {
+  if (!connectorLockEnabled()) return;
+  const lockPath = connectorLockFile(name);
+  if (existsSync(lockPath)) {
+    try {
+      const firstLine = readFileSync(lockPath, "utf8").trim().split("\n")[0] ?? "";
+      const pid = Number(firstLine.split(/\s+/)[0]);
+      if (Number.isFinite(pid) && pid !== process.pid && pidAlive(pid)) {
+        console.error(
+          `[atem-edge] another edge agent for "${name}" is already running (pid ${pid}). Stop it before starting another.`,
+        );
+        process.exit(1);
+      }
+    } catch {
+      /* stale lock */
+    }
+  }
+  writeFileSync(lockPath, `${process.pid} ${new Date().toISOString()}\n`, "utf8");
+  const release = (): void => {
+    try {
+      if (existsSync(lockPath)) unlinkSync(lockPath);
+    } catch {
+      /* ignore */
+    }
+  };
+  process.on("exit", release);
+  process.on("SIGINT", () => {
+    release();
+    process.exit(0);
+  });
+  process.on("SIGTERM", () => {
+    release();
+    process.exit(0);
+  });
 }
 
 function loadConnectorState(filePath: string): { connectorId: string; token: string } | undefined {
@@ -76,7 +152,7 @@ function parseCli(): Cli {
     argvFlag("relay") ??
     process.env.RELAY_URL?.trim() ??
     process.env.RELAY_WS_URL?.trim() ??
-    `ws://127.0.0.1:${BANKS_DEV_PORT}/api/relay/socket`;
+    defaultRelayUrl();
 
   const connectorName =
     argvFlag("name") ??
@@ -86,6 +162,17 @@ function parseCli(): Cli {
     "";
   let connectorId = argvFlag("connector-id") ?? process.env.CONNECTOR_ID?.trim() ?? "";
   let connectorToken = argvFlag("connector-token") ?? process.env.CONNECTOR_TOKEN?.trim() ?? "";
+  const defaultAddress =
+    argvFlag("switcher") ??
+    process.env.ATEM_SWITCHER_ADDRESS?.trim() ??
+    process.env.ATEM_DEFAULT_ADDRESS?.trim() ??
+    "";
+  const defaultPortRaw =
+    argvFlag("switcher-port") ?? process.env.ATEM_SWITCHER_PORT?.trim() ?? "";
+  const defaultPort =
+    defaultPortRaw && Number.isFinite(Number(defaultPortRaw)) && Number(defaultPortRaw) > 0
+      ? Math.round(Number(defaultPortRaw))
+      : undefined;
 
   if (connectorName || connectorId) {
     const stateFile = connectorStateFile(connectorName || "ATEM");
@@ -103,6 +190,8 @@ function parseCli(): Cli {
       ...(connectorId ? { connectorId } : {}),
       ...(connectorToken ? { token: connectorToken } : {}),
       ...(stateFile ? { stateFile } : {}),
+      ...(defaultAddress ? { defaultAddress } : {}),
+      ...(defaultPort !== undefined ? { defaultPort } : {}),
     };
   }
 
@@ -136,22 +225,63 @@ function edgeLog(...args: unknown[]): void {
   console.error("[atem-edge]", ...args);
 }
 
+/** Switcher TCP + CCU traffic to stderr (helper log window). Default on; `ATEM_EDGE_SWITCHER_LOG=0` to disable. */
+function switcherLogEnabled(): boolean {
+  const v = process.env.ATEM_EDGE_SWITCHER_LOG ?? "1";
+  return v !== "0" && v.toLowerCase() !== "false";
+}
+
+function switcherLog(message: string): void {
+  if (!switcherLogEnabled()) return;
+  const line = message.length > 4000 ? `${message.slice(0, 4000)}…` : message;
+  console.error(`[atem-switcher] ${line}`);
+}
+
 function trimLogPayload(raw: string, max = 4000): string {
   return raw.length > max ? `${raw.slice(0, max)}…` : raw;
 }
 
 function errorText(err: unknown): string {
-  if (err instanceof Error) return `${err.name}: ${err.message}`;
-  if (typeof err === "string") return err;
-  try {
-    return JSON.stringify(err);
-  } catch {
-    return String(err);
+  if (err instanceof Error) {
+    const cause = err.cause instanceof Error ? ` (cause: ${err.cause.message})` : "";
+    return `${err.name}: ${err.message || "(no message)"}${cause}`;
   }
+  if (typeof err === "string") return err;
+  if (typeof err === "object" && err !== null) {
+    const o = err as Record<string, unknown>;
+    if (typeof o.message === "string" && o.message.trim()) return o.message.trim();
+    const nested = o.error;
+    if (nested instanceof Error) return errorText(nested);
+    if (typeof nested === "object" && nested !== null) {
+      const nestedText = errorText(nested);
+      if (nestedText && nestedText !== "{}") return nestedText;
+    }
+    const code = o.code ?? o.errno;
+    if (code !== undefined) return `code=${String(code)}`;
+  }
+  try {
+    const json = JSON.stringify(err);
+    if (json && json !== "{}") return json;
+  } catch {
+    /* ignore */
+  }
+  return String(err);
+}
+
+function relayUnreachableHint(relayUrl: string, closeCode?: number): string | undefined {
+  if (closeCode !== 1006 && closeCode !== undefined) return undefined;
+  if (!isLocalRelayUrl(relayUrl)) return undefined;
+  return (
+    `No relay at ${relayUrl} — run \`npm run dev:server\`, set ENVIRONMENT=LOCAL, ` +
+    `or RELAY_URL=${DEFAULT_RELAY_WS}`
+  );
 }
 
 function main(): void {
   const cli = parseCli();
+  if (cli.mode === "connector") {
+    acquireConnectorLock(cli.name);
+  }
   console.error(
     `[atem-edge] relay ${cli.relayUrl} (${
       cli.mode === "connector" ? `connector "${cli.name}"` : `session ${cli.sessionId.slice(0, 8)}…`
@@ -165,6 +295,11 @@ function main(): void {
     }
     if (cli.stateFile) {
       console.error(`[atem-edge] connector state file: ${cli.stateFile}`);
+    }
+    if (cli.defaultAddress) {
+      console.error(
+        `[atem-edge] default switcher: ${cli.defaultAddress}${cli.defaultPort ? `:${cli.defaultPort}` : ""}`,
+      );
     }
     console.error("[atem-edge] waiting for atem_edge_control connect from relay…");
   }
@@ -182,6 +317,24 @@ function main(): void {
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   let shuttingDown = false;
   let sock: WebSocket | undefined;
+
+  const clearConnectorIdentity = (reason: string): void => {
+    if (cli.mode !== "connector") return;
+    reconnectConnectorId = "";
+    reconnectConnectorToken = "";
+    activeConnectorId = "";
+    connectorReady = false;
+    if (cli.stateFile && existsSync(cli.stateFile)) {
+      try {
+        unlinkSync(cli.stateFile);
+        console.error(`[atem-edge] ${reason} — cleared ${cli.stateFile}`);
+      } catch (err) {
+        console.error("[atem-edge] failed to clear connector identity:", errorText(err));
+      }
+    } else {
+      console.error(`[atem-edge] ${reason}`);
+    }
+  };
 
   const uplink = (type: string, body: Record<string, unknown>): void => {
     const ws = sock;
@@ -211,11 +364,11 @@ function main(): void {
       onAtemTcpLinkChange: (linked) => {
         const target = lastConnectTarget;
         if (target) {
-          console.error(
-            `[atem-edge] ATEM TCP ${linked ? "UP" : "DOWN"} ${target.address}:${target.port} (camera ${target.cameraId})`,
+          switcherLog(
+            `TCP ${linked ? "UP" : "DOWN"} ${target.address}:${target.port} (camera ${target.cameraId})`,
           );
         } else {
-          console.error(`[atem-edge] ATEM TCP ${linked ? "UP" : "DOWN"}`);
+          switcherLog(`TCP ${linked ? "UP" : "DOWN"}`);
         }
         const payload = {
           connected: linked,
@@ -235,6 +388,7 @@ function main(): void {
         );
       },
       onHostLog: (message) => {
+        switcherLog(message);
         edgeLog("bridge log:", message);
         uplink(
           cli.mode === "connector" ? "atem_connector_notify" : "atem_edge_notify",
@@ -286,6 +440,8 @@ function main(): void {
           reg.connectorId = reconnectConnectorId;
           reg.token = reconnectConnectorToken;
         }
+        if (cli.defaultAddress) reg.defaultAddress = cli.defaultAddress;
+        if (cli.defaultPort !== undefined) reg.defaultPort = cli.defaultPort;
         ws.send(JSON.stringify(reg));
         edgeLog("sent atem_connector_register", { name: cli.name, reconnect: Boolean(reg.connectorId) });
         return;
@@ -322,11 +478,14 @@ function main(): void {
         const hex = p.hex.replace(/\s+/g, "");
         const preview = hex.length > 96 ? `${hex.slice(0, 96)}…` : hex;
         if (!bridge) {
+          switcherLog(`TX ignored (no switcher TCP yet) ${hex.length} bytes ${preview}`);
           edgeLog("forward_cmd ignored (no ATEM bridge yet)", { hexLen: hex.length, preview });
           return;
         }
+        switcherLog(`TX → switcher ${hex.length} bytes ${preview}`);
         edgeLog("forward_cmd → bridge", { hexLen: hex.length, preview });
         void bridge.handleForwardCmdHex(p.hex).catch((err: unknown) => {
+          switcherLog(`TX failed: ${errorText(err)}`);
           console.error("[atem-edge] forward_cmd", err);
         });
         return;
@@ -365,8 +524,8 @@ function main(): void {
           const targetAddress = p.atemCcu.address.trim();
           const targetCameraId = Math.round(Number(p.atemCcu.cameraId));
           lastConnectTarget = { address: targetAddress, port: tcpPort, cameraId: targetCameraId };
-          console.error(
-            `[atem-edge] connect requested ${targetAddress}:${tcpPort} (camera ${targetCameraId})${
+          switcherLog(
+            `connect requested ${targetAddress}:${tcpPort} (camera ${targetCameraId})${
               fromSession ? ` from session ${fromSession}` : ""
             }`,
           );
@@ -384,15 +543,13 @@ function main(): void {
         if (cmd === "disconnect") {
           edgeLog("atem_edge_control disconnect");
           if (lastConnectTarget) {
-            console.error(
-              `[atem-edge] disconnect requested ${lastConnectTarget.address}:${lastConnectTarget.port} (camera ${lastConnectTarget.cameraId})${
+            switcherLog(
+              `disconnect requested ${lastConnectTarget.address}:${lastConnectTarget.port} (camera ${lastConnectTarget.cameraId})${
                 fromSession ? ` from session ${fromSession}` : ""
               }`,
             );
           } else {
-            console.error(
-              `[atem-edge] disconnect requested${fromSession ? ` from session ${fromSession}` : ""}`,
-            );
+            switcherLog(`disconnect requested${fromSession ? ` from session ${fromSession}` : ""}`);
           }
           bridge?.dispose();
           bridge = undefined;
@@ -410,8 +567,8 @@ function main(): void {
           const targetAddress = lastAtem.address.trim();
           const targetCameraId = Math.round(Number(lastAtem.cameraId));
           lastConnectTarget = { address: targetAddress, port: tcpPort, cameraId: targetCameraId };
-          console.error(
-            `[atem-edge] restart requested ${targetAddress}:${tcpPort} (camera ${targetCameraId})${
+          switcherLog(
+            `restart requested ${targetAddress}:${tcpPort} (camera ${targetCameraId})${
               fromSession ? ` from session ${fromSession}` : ""
             }`,
           );
@@ -423,18 +580,10 @@ function main(): void {
       if (t === "session_ended") {
         if (cli.mode === "connector") {
           const hadReconnectCreds = Boolean(reconnectConnectorId && reconnectConnectorToken);
-          if (!connectorReady && hadReconnectCreds && cli.stateFile) {
-            try {
-              if (existsSync(cli.stateFile)) unlinkSync(cli.stateFile);
-              console.error(
-                `[atem-edge] connector auth rejected; removed stale identity file: ${cli.stateFile}`,
-              );
-            } catch (err) {
-              console.error("[atem-edge] failed to clear stale connector identity:", errorText(err));
-            }
-            reconnectConnectorId = "";
-            reconnectConnectorToken = "";
-            activeConnectorId = "";
+          if (hadReconnectCreds) {
+            clearConnectorIdentity(
+              "connector auth rejected (stale token on relay — another instance or relay restart?)",
+            );
             console.error("[atem-edge] retrying connector register with fresh identity");
           } else {
             console.error("[atem-edge] session ended (connector mode) — reconnecting");
@@ -463,6 +612,15 @@ function main(): void {
       if (sock !== ws) return;
       const reasonText = typeof reason === "string" ? reason : Buffer.from(reason).toString("utf8");
       console.error(`[atem-edge] relay socket closed code=${code} reason=${reasonText || "(empty)"}`);
+      if (cli.mode === "connector") {
+        if (code === 4003) {
+          clearConnectorIdentity("bad connector token from relay");
+        } else if (code === 4100 || reasonText.toLowerCase().includes("replaced")) {
+          clearConnectorIdentity("connector replaced on relay (duplicate edge agent?)");
+        }
+      }
+      const hint = relayUnreachableHint(cli.relayUrl, code);
+      if (hint) console.error(`[atem-edge] ${hint}`);
       bridge?.dispose();
       bridge = undefined;
       if (shuttingDown) return;
@@ -471,7 +629,10 @@ function main(): void {
 
     ws.addEventListener("error", (e) => {
       if (sock !== ws) return;
-      console.error("[atem-edge] socket error", errorText(e));
+      const detail = errorText(e);
+      console.error(`[atem-edge] relay socket error: ${detail}`);
+      const hint = relayUnreachableHint(cli.relayUrl);
+      if (hint) console.error(`[atem-edge] ${hint}`);
     });
 
     ws.on("unexpected-response", (_req, res) => {

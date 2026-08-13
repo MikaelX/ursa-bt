@@ -12,6 +12,14 @@ The UI is modeled on the look and feel of a broadcast camera CCU panel: white-ba
   <img src=".github/screenshots/panel-mobile.png" alt="Camera Control Panel — mobile view" width="320" />
 </p>
 
+<p align="center">
+  <img src=".github/screenshots/iris-desktop.png" alt="IRIS view — desktop" width="720" />
+</p>
+
+<p align="center">
+  <img src=".github/screenshots/iris-mobile.png" alt="IRIS view — mobile" width="320" />
+</p>
+
 > ⚠️ This is a personal hobby project, not a Blackmagic product. It is not affiliated with or endorsed by Blackmagic Design.
 
 ## Status
@@ -123,8 +131,8 @@ open "dist/ATEM Edge Helper.app"
 
 The helper can:
 - start/stop `npm run atem:edge-agent`
-- set relay URL + connector name and persist them
-- show rolling stdout/stderr logs
+- set relay URL, connector name, and local switcher IP (Connect UI then only needs camera)
+- show rolling stdout/stderr logs (switcher TCP connect/disconnect, RX `[atem-raw]`, TX hex)
 - register itself as "Start on Login"
 
 ## Docker

@@ -33,8 +33,22 @@ function localRelayBaseUrl(): URL {
   return new URL(DEBUG_RELAY_LOCALHOST_ORIGIN);
 }
 
+function isCapacitorNative(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return (
+      (window as { Capacitor?: { isNativePlatform?: () => boolean } }).Capacitor?.isNativePlatform?.() ===
+      true
+    );
+  } catch {
+    return false;
+  }
+}
+
 function useDebugRelayHubLocalhost(): boolean {
   if (typeof window === "undefined") return false;
+  // iOS/Android store builds: never route relay to Mac localhost (Debug tab localStorage persists in WebView).
+  if (isCapacitorNative() && !useLocalRelayHub()) return false;
   try {
     return window.localStorage.getItem(DEBUG_RELAY_HUB_LOCALHOST_LS) === "1";
   } catch {

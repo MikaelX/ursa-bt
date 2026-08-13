@@ -65,7 +65,7 @@ npm run ios:open    # opens the Xcode project (same as ios/App/App.xcodeproj)
 
 In Xcode: choose any **iPhone** simulator as the run destination, select the **App** scheme, press **Run** (⌘R).
 
-**Bluetooth:** Core Bluetooth **does not work in the iOS Simulator**. `@capacitor-community/bluetooth-le` rejects `initialize` with `"BLE unsupported"` there ([plugin README — iOS](https://github.com/capacitor-community/bluetooth-le/blob/main/README.md)). Expect **Connect** (BLE) to fail in Simulator; use **Join** to exercise relay/UI against a hosted session, or test BLE on a **physical iPhone**.
+**Bluetooth:** Core Bluetooth **does not work in the iOS Simulator**. `@capacitor-community/bluetooth-le` rejects `initialize` with `"BLE unsupported"` there ([plugin README — iOS](https://github.com/capacitor-community/bluetooth-le/blob/main/README.md)). Expect **Connect** (BLE) to fail in Simulator; use **Join** for relay/UI, or **ATEM mixer → Connect** (pick truck connector + camera; TCP stays on the LAN edge agent), or test BLE on a **physical iPhone**.
 
 Live reload against dev server: configure `server.url` in `capacitor.config.ts` temporarily (see Capacitor docs); revert before release builds.
 

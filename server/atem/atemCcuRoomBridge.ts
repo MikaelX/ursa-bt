@@ -212,6 +212,18 @@ export class AtemCcuRoomBridge {
     return this.tcpLinked;
   }
 
+  /** Latest CC audio input L/R pairs keyed by CC `source` / camera id. */
+  getAllAudioInputLevels(): ReadonlyMap<number, { left: number; right: number }> {
+    const out = new Map<number, { left: number; right: number }>();
+    for (const [source, bucket] of this.auxBuckets) {
+      const levels = bucket.audio.inputLevels;
+      if (!levels) continue;
+      if (!Number.isFinite(levels.left) || !Number.isFinite(levels.right)) continue;
+      out.set(source, { left: levels.left, right: levels.right });
+    }
+    return out;
+  }
+
   private emitMergedPanelSync(
     st: AtemCameraControlState | undefined,
     trace?: Record<string, unknown>,
@@ -308,6 +320,9 @@ export class AtemCcuRoomBridge {
       console.warn(
         `[atem-ccu] TCP reconnect attempt ${attempt} → ${this.switcherAddress}:${this.tcpPort} (every ${AtemCcuRoomBridge.TCP_RECONNECT_INTERVAL_MS / 1000}s while down)`,
       );
+      this.emitHostLog(
+        `TCP reconnect attempt ${attempt} → ${this.switcherAddress}:${this.tcpPort} (camera ${this.cameraId})`,
+      );
       void this.connect(this.switcherAddress, this.tcpPort);
     }, AtemCcuRoomBridge.TCP_RECONNECT_INTERVAL_MS);
   }
@@ -326,6 +341,7 @@ export class AtemCcuRoomBridge {
     this.clearReconnectSchedule();
     this.switcherAddress = address.trim();
     this.tcpPort = port;
+    this.emitHostLog(`connecting ${address}:${port} (camera ${this.cameraId})`);
 
     await this.destroyLiveAtemInstance();
 
@@ -335,7 +351,7 @@ export class AtemCcuRoomBridge {
 
     atem.on("connected", () => {
       this.emitHostLog(
-        "ATEM hub: switcher session up — mixer lines appear when TCP batches parse to commands; `[atem-raw]` batches log below when hub RX logging is on.",
+        `TCP connected ${this.switcherAddress}:${this.tcpPort} (camera ${this.cameraId})`,
       );
     });
     atem.on("debug", (msg: string) => {
@@ -356,6 +372,7 @@ export class AtemCcuRoomBridge {
 
     atem.on("disconnected", () => {
       if (this.disposed) return;
+      this.emitHostLog(`TCP disconnected ${this.switcherAddress}:${this.tcpPort} (camera ${this.cameraId})`);
       /** False when {@link destroyLiveAtemInstance} already cleared `this.atem` — do not schedule reconnect. */
       const stillCurrent = this.atem === atem;
       const was = this.tcpLinked;
@@ -563,7 +580,9 @@ export class AtemCcuRoomBridge {
     } catch (e) {
       await atem.destroy().catch(() => {});
       if (!this.disposed) {
-        console.warn("[atem-ccu] TCP connect failed:", e instanceof Error ? e.message : e);
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn("[atem-ccu] TCP connect failed:", msg);
+        this.emitHostLog(`TCP connect failed ${address}:${port} (camera ${this.cameraId}): ${msg}`);
         this.scheduleTcpReconnect();
       }
       return;

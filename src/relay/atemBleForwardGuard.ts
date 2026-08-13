@@ -42,6 +42,14 @@ export function bleDecodedHandledByAtemBridge(p: DecodedConfigurationPacket): bo
     }
     case 4:
       return p.parameter === 4 || p.parameter === 6;
+    case 2:
+      if (p.parameter >= 0 && p.parameter <= 3) {
+        return p.dataType === CameraControlDataType.Fixed16;
+      }
+      if (p.parameter === 4 || p.parameter === 6) {
+        return p.dataType === CameraControlDataType.Int8 || p.dataType === CameraControlDataType.VoidOrBool;
+      }
+      return p.parameter === 5 && p.dataType === CameraControlDataType.Fixed16;
     case 8:
       return p.parameter >= 0 && p.parameter <= 7;
     case 10:

@@ -15,7 +15,9 @@ const capacitorBuild = process.env.CAPACITOR_BUILD === "1";
 const appEnvironment =
   typeof process.env.ENVIRONMENT === "string" && process.env.ENVIRONMENT.trim() !== ""
     ? process.env.ENVIRONMENT.trim()
-    : "development";
+    : capacitorBuild
+      ? "production"
+      : "development";
 
 export default defineConfig({
   define: {
@@ -37,6 +39,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: resolve(repoRoot, "index.html"),
+        audioGain: resolve(repoRoot, "audio-gain.html"),
         patterns: resolve(repoRoot, "patterns.html"),
       },
     },
