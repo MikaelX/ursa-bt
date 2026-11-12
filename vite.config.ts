@@ -46,6 +46,8 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
+    // Cap workers: Vitest defaults to cores - 1; parallel agent test runs exhausted RAM on the dev Mac.
+    maxWorkers: 4,
     globals: true,
   },
 });
